@@ -1,5 +1,6 @@
 # bot/storage.py
 import json
+import os
 from datetime import datetime, timezone
 from typing import Dict, Tuple, Optional
 
@@ -10,12 +11,16 @@ from .models import OrderSession
 
 SESSIONS: Dict[Tuple[int, int], OrderSession] = {}
 
+LOG_FILE = "ai_bot.json"
+
 
 def get_session_key(message: Message) -> Tuple[int, int]:
     return message.chat.id, message.from_user.id  # type: ignore[union-attr]
 
 
 def get_or_create_session(settings: Settings, message: Message) -> OrderSession:
+    from datetime import datetime, timezone
+
     key = get_session_key(message)
     now = datetime.now(timezone.utc)
     session = SESSIONS.get(key)
@@ -52,9 +57,6 @@ def clear_session(key: Tuple[int, int]) -> None:
         del SESSIONS[key]
 
 
-LOG_FILE = "ai_bot.json"
-
-
 def save_order_to_json(order: OrderSession) -> None:
     log_entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -67,6 +69,32 @@ def save_order_to_json(order: OrderSession) -> None:
         "raw_messages": order.raw_messages,
     }
 
-    # Write as NDJSON (newline-delimited JSON)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+    data = []
+
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+
+        if content:
+            try:
+                existing = json.loads(content)
+                if isinstance(existing, list):
+                    data = existing
+                else:
+                    data = [existing]
+            except json.JSONDecodeError:
+                lines = content.splitlines()
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        data.append(obj)
+                    except json.JSONDecodeError:
+                        continue
+
+    data.append(log_entry)
+
+    with open(LOG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)

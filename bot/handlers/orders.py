@@ -57,6 +57,10 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         session = get_or_create_session(settings, message)
         key = get_session_key(message)
 
+        if session.is_completed:
+            logger.info("Session already completed for key=%s, skipping.", key)
+            return
+
         if text:
             session.raw_messages.append(text)
 
@@ -64,9 +68,13 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         for p in phones:
             session.phones.add(p)
 
+        had_location_before = session.location is not None
         loc = extract_location_from_message(message)
+        just_got_location = False
         if loc:
             session.location = loc
+            if not had_location_before:
+                just_got_location = True
 
         logger.info("Current session phones=%s", session.phones)
         logger.info("Current session location=%s", session.location)
@@ -86,13 +94,29 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
         session.updated_at = datetime.now(timezone.utc)
 
+        ready = is_session_ready(session)
         logger.info(
-            "Session ready=%s | is_completed=%s",
-            is_session_ready(session),
+            "Session ready=%s | is_completed=%s | just_got_location=%s",
+            ready,
             session.is_completed,
+            just_got_location,
         )
 
-        if not is_session_ready(session):
+        if not ready:
+            return
+
+        should_finalize = False
+        if just_got_location:
+            should_finalize = True
+        elif role == "PRODUCT" or has_addr_kw:
+            should_finalize = True
+
+        if not should_finalize:
+            logger.info("Session is ready, but current message is not a finalize trigger.")
+            return
+
+        if session.is_completed:
+            logger.info("Session became completed before finalize, skipping.")
             return
 
         finalized = finalize_session(key)
