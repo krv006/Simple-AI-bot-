@@ -1,7 +1,5 @@
-# bot/config.py
 import os
 from dataclasses import dataclass
-
 from dotenv import load_dotenv
 
 
@@ -15,11 +13,11 @@ class Settings:
     max_diff_seconds: int
     geocoder_user_agent: str
     debug: bool
-    send_group_id: int | None  # SEND_GROUP_ID dan keladi
+    send_group_id: int | None
+    error_group_id: int | None
 
     @property
     def openai_enabled(self) -> bool:
-        """OpenAI ishlatish mumkinmi-yo'qmi (kalit bor-yo'qligiga qarab)."""
         return bool(self.openai_api_key)
 
 
@@ -40,14 +38,19 @@ def load_settings() -> Settings:
     geocoder_user_agent = os.getenv("GEOCODER_USER_AGENT", "ai_taxi_bot")
     debug = os.getenv("DEBUG", "False").lower() == "true"
 
-    # SEND_GROUP_ID ni o'qiymiz
     send_group_raw = os.getenv("SEND_GROUP_ID")
-    send_group_id: int | None = None
-    if send_group_raw:
+    error_group_raw = os.getenv("SEND_ERROR_MESSAGE")
+
+    def _to_int(value: str | None) -> int | None:
+        if not value:
+            return None
         try:
-            send_group_id = int(send_group_raw)
+            return int(value)
         except ValueError:
-            send_group_id = None
+            return None
+
+    send_group_id = _to_int(send_group_raw)
+    error_group_id = _to_int(error_group_raw)
 
     return Settings(
         tg_bot_token=tg_bot_token,
@@ -59,4 +62,5 @@ def load_settings() -> Settings:
         geocoder_user_agent=geocoder_user_agent,
         debug=debug,
         send_group_id=send_group_id,
+        error_group_id=error_group_id,
     )

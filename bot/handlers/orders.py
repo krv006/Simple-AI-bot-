@@ -1,9 +1,9 @@
-# bot/handlers/orders.py
 import logging
 from datetime import datetime, timezone
 
 from aiogram import Dispatcher, F
 from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 
@@ -34,6 +34,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
     @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
     async def handle_group_message(message: Message):
+
         if message.from_user is None or message.from_user.is_bot:
             return
 
@@ -64,9 +65,13 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         if text:
             session.raw_messages.append(text)
 
+        had_phones_before = bool(session.phones)
+
         phones = extract_phones(text)
         for p in phones:
             session.phones.add(p)
+
+        phones_new = bool(session.phones) and not had_phones_before
 
         had_location_before = session.location is not None
         loc = extract_location_from_message(message)
@@ -82,8 +87,37 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         ai_result = await classify_text_ai(settings, text, session.raw_messages)
         role = ai_result.get("role", "UNKNOWN")
         has_addr_kw = ai_result.get("has_address_keywords", False)
+        is_order_related = ai_result.get("is_order_related", False)
 
         logger.info("AI result=%s", ai_result)
+
+        if (
+                settings.error_group_id
+                and not is_order_related
+                and not phones
+                and not message.location
+                and text.strip()
+        ):
+            src_chat_title = message.chat.title or str(message.chat.id)
+            user = message.from_user
+            full_name = user.full_name if user and user.full_name else f"id={user.id}"
+
+            error_text = (
+                f"👥 Guruh: {src_chat_title}\n"
+                f"👤 User: {full_name} (id: {user.id})\n\n"
+                f"📩 Xabar:\n{text}"
+            )
+
+            try:
+                await message.bot.send_message(settings.error_group_id, error_text)
+            except TelegramBadRequest as e:
+                logger.error(
+                    "Failed to send non-order message to error_group_id=%s: %s",
+                    settings.error_group_id,
+                    e,
+                )
+
+            return
 
         if role == "PRODUCT":
             if text:
@@ -95,28 +129,27 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         session.updated_at = datetime.now(timezone.utc)
 
         ready = is_session_ready(session)
+
         logger.info(
-            "Session ready=%s | is_completed=%s | just_got_location=%s",
+            "Session ready=%s | is_completed=%s | just_got_location=%s | phones_new=%s",
             ready,
             session.is_completed,
             just_got_location,
+            phones_new,
         )
 
-        if not ready:
+        if not ready or session.is_completed:
             return
 
-        should_finalize = False
-        if just_got_location:
-            should_finalize = True
-        elif role == "PRODUCT" or has_addr_kw:
-            should_finalize = True
+        should_finalize = (
+                just_got_location
+                or role == "PRODUCT"
+                or has_addr_kw
+                or phones_new
+        )
 
         if not should_finalize:
             logger.info("Session is ready, but current message is not a finalize trigger.")
-            return
-
-        if session.is_completed:
-            logger.info("Session became completed before finalize, skipping.")
             return
 
         finalized = finalize_session(key)
@@ -160,6 +193,17 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         target_chat_id = settings.send_group_id or message.chat.id
         logger.info("Sending order to target group=%s", target_chat_id)
 
-        await message.bot.send_message(target_chat_id, msg_text)
+        try:
+            await message.bot.send_message(target_chat_id, msg_text)
+        except TelegramBadRequest as e:
+            logger.error(
+                "Failed to send order to target_chat_id=%s: %s. "
+                "Falling back to source chat_id=%s",
+                target_chat_id,
+                e,
+                message.chat.id,
+            )
+            await message.answer(msg_text)
+
         clear_session(key)
         logger.info("Session cleared for key=%s", key)
