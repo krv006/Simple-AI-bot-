@@ -1,5 +1,7 @@
+# bot/config.py
 import os
 from dataclasses import dataclass
+
 from dotenv import load_dotenv
 
 
@@ -15,6 +17,8 @@ class Settings:
     debug: bool
     send_group_id: int | None
     error_group_id: int | None
+    ai_check_group_id: int | None  # AI_CHECK guruh
+    db_dsn: str | None  # Postgres DSN
 
     @property
     def openai_enabled(self) -> bool:
@@ -40,6 +44,9 @@ def load_settings() -> Settings:
 
     send_group_raw = os.getenv("SEND_GROUP_ID")
     error_group_raw = os.getenv("SEND_ERROR_MESSAGE")
+    ai_check_raw = os.getenv("AI_CHECK")
+
+    db_dsn = os.getenv("DB_DSN")  # postgresql://user:pass@host:port/ai_bot
 
     def _to_int(value: str | None) -> int | None:
         if not value:
@@ -51,6 +58,7 @@ def load_settings() -> Settings:
 
     send_group_id = _to_int(send_group_raw)
     error_group_id = _to_int(error_group_raw)
+    ai_check_group_id = _to_int(ai_check_raw)
 
     return Settings(
         tg_bot_token=tg_bot_token,
@@ -63,4 +71,6 @@ def load_settings() -> Settings:
         debug=debug,
         send_group_id=send_group_id,
         error_group_id=error_group_id,
+        ai_check_group_id=ai_check_group_id,
+        db_dsn=db_dsn,
     )

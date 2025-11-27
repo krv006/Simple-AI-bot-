@@ -1,7 +1,9 @@
-# bot/handlers/orders.py
+# bot/handlers/order.py
+import json
 import logging
 import re
 from datetime import datetime, timezone
+from typing import List
 
 from aiogram import Dispatcher, F
 from aiogram.enums import ChatType
@@ -44,34 +46,84 @@ def _normalize_digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
 
-def _is_phone_like_line(text: str) -> bool:
-    """
-    Faqat telefon yozilgan qatormi?
-    Masalan: "991311115", "+998 99 131 11 15", "(99)131-11-15"
-    """
-    if not text:
-        return False
-    digits = _normalize_digits(text)
-    if not (7 <= len(digits) <= 13):
-        return False
-    # Telefon belgilaridan tashqari ham nimadir bormi?
-    cleaned = re.sub(r"[0-9+\-\s()]", "", text)
-    return cleaned.strip() == ""
+def _append_dataset_line(filename: str, payload: dict) -> None:
+    try:
+        with open(filename, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.error("Failed to write dataset line to %s: %s", filename, e)
 
 
-def _build_final_texts(raw_messages: list[str], phones: set[str]):
-    """
-    Yakuniy product va comment matnlarini faqat raw_messages asosida quramiz.
+def _choose_client_phones(raw_messages: List[str], phones: set[str]) -> List[str]:
+    if not phones:
+        return []
 
-    - faqat telefon ko‘rinishidagi satrlar productga kirmaydi
-    - raqamli, lekin toza telefon bo‘lmagan satrlar productga tushadi
-    - COMMENT_KEYWORDS bo'lgan raqam-siz matnlar commentga tushadi
-    """
+    phones = set(phones)
 
-    phones_sorted = sorted(phones)  # ekranga chiqarish uchun
+    client_kw = [
+        "номер клиента",
+        "клиента",
+        "клиент",
+        "mijoz",
+        "mijoz tel",
+        "telefon klienta",
+        "номер клиентa",
+    ]
+    shop_kw = [
+        "номер нашего магазина",
+        "нашего магазина",
+        "наш магазин",
+        "магазин",
+        "magazin",
+        "our shop",
+        "номер магазина",
+    ]
 
-    product_lines: list[str] = []
-    comment_lines: list[str] = []
+    phone_role: dict[str, str] = {p: "unknown" for p in phones}
+
+    for msg in raw_messages:
+        for line in msg.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            low = line.lower()
+            line_phones = extract_phones(line)
+            if not line_phones:
+                continue
+
+            is_shop_line = any(kw in low for kw in shop_kw)
+            is_client_line = any(kw in low for kw in client_kw)
+
+            for p in line_phones:
+                if p not in phone_role:
+                    phone_role[p] = "unknown"
+
+                if is_shop_line:
+                    phone_role[p] = "shop"
+                elif is_client_line and phone_role.get(p) != "shop":
+                    phone_role[p] = "client"
+
+    client_phones = [p for p, role in phone_role.items() if role == "client"]
+    if client_phones:
+        return sorted(client_phones)
+
+    if len(phones) == 1:
+        return sorted(phones)
+
+    return sorted(phones)
+
+
+def _build_final_texts(raw_messages: List[str], phones: set[str]):
+    client_phones = _choose_client_phones(raw_messages, phones)
+    client_digits = {
+        _normalize_digits(p)[-7:]
+        for p in client_phones
+        if _normalize_digits(p)
+    }
+
+    product_lines: List[str] = []
+    comment_lines: List[str] = []
 
     for msg in raw_messages:
         text = (msg or "").strip()
@@ -80,51 +132,25 @@ def _build_final_texts(raw_messages: list[str], phones: set[str]):
 
         low = text.lower()
         has_digits = any(ch.isdigit() for ch in text)
+        digits = _normalize_digits(text)
 
-        # Toza telefon bo‘lsa – product/commentga kiritmaymiz
-        if _is_phone_like_line(text):
-            continue
+        is_pure_client_phone = False
+        if has_digits and digits:
+            for cd in client_digits:
+                if cd and digits.endswith(cd) and len(digits) <= 13:
+                    is_pure_client_phone = True
+                    break
 
-        if has_digits:
-            # bu yerga summa, "412ming", "Summa 109000", "20 min" va h.k. kiradi
+        if has_digits and not is_pure_client_phone:
             product_lines.append(text)
             continue
 
-        # raqam yo'q bo'lsa:
         if any(kw in low for kw in COMMENT_KEYWORDS):
             comment_lines.append(text)
         else:
-            # Masalan, "Kichik doner + kola" – raqam bo'lmasa ham product bo'lishi mumkin
             product_lines.append(text)
 
-    return phones_sorted, product_lines, comment_lines
-
-
-def _has_product_candidate(raw_messages: list[str]) -> bool:
-    """
-    Sessiyada productga o‘xshagan qatormiz bormi-yo‘qligini tekshiradi.
-    Faqat telefon ko‘rinishidagi satrlar hisobga olinmaydi.
-    """
-    money_kw = ["summa", "suma", "sum", "мин", "минг", "сум", "сом", "тыс"]
-
-    for msg in raw_messages:
-        text = (msg or "").strip()
-        if not text:
-            continue
-
-        if _is_phone_like_line(text):
-            # bu faqat telefon, product emas
-            continue
-
-        low = text.lower()
-        has_digits = any(ch.isdigit() for ch in text)
-
-        if has_digits:
-            return True
-        if any(kw in low for kw in money_kw):
-            return True
-
-    return False
+    return client_phones, product_lines, comment_lines
 
 
 def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
@@ -165,18 +191,15 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             logger.info("Session already completed for key=%s, skipping.", key)
             return
 
-        # Hamma textlarni saqlaymiz – keyin shundan product/comment yig'amiz
         if text:
             session.raw_messages.append(text)
 
-        # --- Phones ---
         had_phones_before = bool(session.phones)
-        phones = extract_phones(text)
-        for p in phones:
+        phones_in_msg = extract_phones(text)
+        for p in phones_in_msg:
             session.phones.add(p)
         phones_new = bool(session.phones) and not had_phones_before
 
-        # --- Location ---
         had_location_before = session.location is not None
         loc = extract_location_from_message(message)
         just_got_location = False
@@ -188,38 +211,106 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         logger.info("Current session phones=%s", session.phones)
         logger.info("Current session location=%s", session.location)
 
-        # --- AI classification faqat “zakazga aloqador/emas” va triggering uchun ---
+        # === AI klassifikatsiya ===
         ai_result = await classify_text_ai(settings, text, session.raw_messages)
         role = ai_result.get("role", "UNKNOWN")
         has_addr_kw = ai_result.get("has_address_keywords", False)
         is_order_related = ai_result.get("is_order_related", False)
+        reason = ai_result.get("reason") or ""
+        order_prob = ai_result.get("order_probability", None)
+        source = ai_result.get("source", "UNKNOWN")
 
         logger.info("AI result=%s", ai_result)
 
+        # === HAR BIR XABARNI AI_CHECK GURUHIGA YUBORISH ===
+        if settings.ai_check_group_id:
+            src_chat_title = message.chat.title or str(message.chat.id)
+            user = message.from_user
+            full_name = (
+                user.full_name if (user and user.full_name) else f"id={user.id}"
+            )
+
+            is_order_txt = "Ha" if is_order_related else "Yo'q"
+            has_addr_txt = "Ha" if has_addr_kw else "Yo'q"
+
+            debug_text = (
+                "🤖 AI CHECK\n"
+                f"👥 Guruh: {src_chat_title}\n"
+                f"👤 User: {full_name} (id: {user.id})\n\n"
+                f"📩 Xabar:\n{text}\n\n"
+                "AI natijasi:\n"
+                f"- orderga aloqador: {is_order_txt}\n"
+                f"- role: {role}\n"
+                f"- manzil kalit so'zlari: {has_addr_txt}\n"
+                f"- manba: {source}\n"
+            )
+
+            if isinstance(order_prob, (int, float)):
+                debug_text += f"- order ehtimoli: {order_prob:.2f}\n"
+
+            if reason:
+                debug_text += f"\nSabab:\n{reason}"
+
+            try:
+                await message.bot.send_message(
+                    settings.ai_check_group_id, debug_text
+                )
+            except TelegramBadRequest as e:
+                logger.error(
+                    "Failed to send AI_CHECK log to ai_check_group_id=%s: %s",
+                    settings.ai_check_group_id,
+                    e,
+                )
+
+            # Dataset uchun yozib boramiz
+            _append_dataset_line(
+                "ai_check.txt",
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "chat_id": message.chat.id,
+                    "chat_title": src_chat_title,
+                    "user_id": user.id,
+                    "user_name": full_name,
+                    "text": text,
+                    "ai": {
+                        "is_order_related": is_order_related,
+                        "role": role,
+                        "has_address_keywords": has_addr_kw,
+                        "reason": reason,
+                        "order_probability": order_prob,
+                        "source": source,
+                    },
+                },
+            )
+
+        # === Eski role fallback va PRODUCT/COMMENT logika ===
         low = text.lower()
         has_digits = any(ch.isdigit() for ch in text)
+        money_kw = ["summa", "ming", "min", "мин", "минг", "сум", "сом", "тыс"]
 
-        # Qo‘shimcha rule-based: summa / min / ming kabi so‘zlar
+        has_product_candidate = bool(
+            has_digits or any(kw in low for kw in money_kw)
+        )
+
         if role == "UNKNOWN":
-            money_kw = ["summa", "suma", "sum", "ming", "min", "мин", "минг", "сум", "сом", "тыс"]
-            if has_digits or any(kw in low for kw in money_kw):
+            if has_product_candidate:
                 role = "PRODUCT"
             if any(kw in low for kw in COMMENT_KEYWORDS):
                 role = "COMMENT"
 
-        has_product_candidate = _has_product_candidate(session.raw_messages)
-
-        # Zakazga aloqador bo‘lmagan, telefon/loc yo‘q oddiy gaplarni error guruhga yuboramiz
+        # === NON-ORDER (error_group) LOGIKA ===
         if (
                 settings.error_group_id
                 and not is_order_related
-                and not phones
+                and not phones_in_msg
                 and not message.location
                 and text.strip()
         ):
             src_chat_title = message.chat.title or str(message.chat.id)
             user = message.from_user
-            full_name = user.full_name if user and user.full_name else f"id={user.id}"
+            full_name = (
+                user.full_name if user and user.full_name else f"id={user.id}"
+            )
 
             error_text = (
                 f"👥 Guruh: {src_chat_title}\n"
@@ -227,8 +318,23 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                 f"📩 Xabar:\n{text}"
             )
 
+            _append_dataset_line(
+                "errors.txt",
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "type": "error",
+                    "chat_id": message.chat.id,
+                    "chat_title": src_chat_title,
+                    "user_id": user.id,
+                    "user_name": full_name,
+                    "text": text,
+                },
+            )
+
             try:
-                await message.bot.send_message(settings.error_group_id, error_text)
+                await message.bot.send_message(
+                    settings.error_group_id, error_text
+                )
             except TelegramBadRequest as e:
                 logger.error(
                     "Failed to send non-order message to error_group_id=%s: %s",
@@ -237,11 +343,13 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                 )
             return
 
+        # === Session update ===
         session.updated_at = datetime.now(timezone.utc)
 
         ready = is_session_ready(session)
         logger.info(
-            "Session ready=%s | is_completed=%s | just_got_location=%s | phones_new=%s | has_product_candidate=%s",
+            "Session ready=%s | is_completed=%s | just_got_location=%s | "
+            "phones_new=%s | has_product_candidate=%s",
             ready,
             session.is_completed,
             just_got_location,
@@ -252,44 +360,36 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         if not ready or session.is_completed:
             return
 
-        # Finalize shartlari:
-        # 1) Lokatsiya endi keldi VA allaqachon productga o‘xshagan textlar bor
-        # 2) Yoki hozirgi xabar PRODUCT bo‘lsa va sessiya tayyor bo‘lsa
-        # 3) Yoki adres kalit so‘zlari bor bo‘lsa va sessiya tayyor bo‘lsa
-        # 4) Yoki telefon endi keldi VA oldin product candidate bo‘lsa
         should_finalize = (
-                (just_got_location and has_product_candidate)
-                or (role == "PRODUCT" and ready)
-                or (has_addr_kw and ready)
-                or (phones_new and has_product_candidate and ready)
+                just_got_location
+                or role == "PRODUCT"
+                or has_addr_kw
+                or phones_new
+                or has_product_candidate
         )
 
         if not should_finalize:
-            logger.info("Session is ready, but current message is not a finalize trigger.")
+            logger.info(
+                "Session is ready, but current message is not a finalize trigger."
+            )
             return
 
         finalized = finalize_session(key)
-        logger.info("Finalizing session key=%s, finalized=%s", key, bool(finalized))
+        logger.info(
+            "Finalizing session key=%s, finalized=%s", key, bool(finalized)
+        )
         if not finalized:
             return
 
-        # Yakuniy product/commentlarni faqat raw_messages asosida qayta hisoblaymiz
-        final_phones, final_products, final_comments = _build_final_texts(
+        client_phones, final_products, final_comments = _build_final_texts(
             finalized.raw_messages, finalized.phones
         )
-
-        # JSON uchun ham shu yangilangan qiymatlarni berib qo‘yamiz
-        try:
-            finalized.product_texts = final_products
-            finalized.comments = final_comments
-        except Exception:
-            pass
 
         chat_title = message.chat.title or "Noma'lum guruh"
         user = message.from_user
         full_name = user.full_name if user.full_name else f"id={user.id}"
 
-        phones_str = ", ".join(final_phones) if final_phones else "—"
+        phones_str = ", ".join(client_phones) if client_phones else "—"
         comment_str = "\n".join(final_comments) if final_comments else "—"
         products_str = "\n".join(final_products) if final_products else "—"
 
@@ -298,7 +398,9 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             if loc["type"] == "telegram":
                 lat = loc["lat"]
                 lon = loc["lon"]
-                loc_str = f"Telegram location\nhttps://maps.google.com/?q={lat},{lon}"
+                loc_str = (
+                    f"Telegram location\nhttps://maps.google.com/?q={lat},{lon}"
+                )
             else:
                 raw_loc = loc["raw"] or ""
                 loc_str = f"{loc['type']} location: {raw_loc}"
@@ -318,6 +420,21 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         save_order_to_json(finalized)
         logger.info("Order saved to ai_bot.json for key=%s", key)
 
+        _append_dataset_line(
+            "order.txt",
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "type": "order",
+                "chat_id": message.chat.id,
+                "chat_title": chat_title,
+                "user_id": user.id,
+                "user_name": full_name,
+                "phones": client_phones,
+                "location": finalized.location,
+                "raw_messages": finalized.raw_messages,
+            },
+        )
+
         target_chat_id = settings.send_group_id or message.chat.id
         logger.info("Sending order to target group=%s", target_chat_id)
 
@@ -329,7 +446,6 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                 "Falling back to source chat_id=%s",
                 target_chat_id,
                 e,
-                message.chat.id,
             )
             await message.answer(msg_text)
 
