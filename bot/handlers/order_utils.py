@@ -3,7 +3,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import List, Set
+from typing import Any, Dict, List, Optional, Set
 
 from ..utils.phones import extract_phones
 
@@ -213,15 +213,15 @@ def build_final_texts(raw_messages: List[str], phones: Set[str]):
         # Telefon satrlarini tashlab yuboramiz
         if extract_phones(text):
             if any(
-                kw in low
-                for kw in [
-                    "номер телефона",
-                    "номер клиента",
-                    "телефон:",
-                    "telefon:",
-                    "телефон ",
-                    "telefon ",
-                ]
+                    kw in low
+                    for kw in [
+                        "номер телефона",
+                        "номер клиента",
+                        "телефон:",
+                        "telefon:",
+                        "телефон ",
+                        "telefon ",
+                    ]
             ):
                 continue
 
@@ -252,3 +252,100 @@ def make_timestamp() -> str:
     UTC timestamp (ISO format) – dataset yozuvlarda ishlatish uchun.
     """
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_order_message_text(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Zakaz xabarini (🆕 Yangi zakaz ...) parslash:
+    - order_id
+    - chat_title
+    - client_name, client_id
+    - phones (list)
+    - location_text (manzil satri)
+    - comments (str)
+    - products (str)
+    """
+    lines = text.splitlines()
+    if not lines:
+        return None
+
+    first = lines[0]
+    if not first.startswith("🆕 Yangi zakaz"):
+        return None
+
+    order_id: Optional[int] = None
+    m = re.search(r"\(ID:\s*(\d+)\)", first)
+    if m:
+        try:
+            order_id = int(m.group(1))
+        except ValueError:
+            order_id = None
+
+    chat_title = ""
+    client_name = ""
+    client_id: Optional[int] = None
+    location_text: Optional[str] = None
+
+    for l in lines:
+        if l.startswith("👥 Guruhdan:"):
+            chat_title = l.split(":", 1)[1].strip()
+        elif l.startswith("👤 Mijoz:"):
+            # format: "👤 Mijoz: Full Name (id: 123456)"
+            body = l.split("Mijoz:", 1)[1].strip() if "Mijoz:" in l else l
+            if "(id:" in body:
+                name_part, id_part = body.split("(id:", 1)
+                client_name = name_part.strip()
+                id_digits = re.findall(r"\d+", id_part)
+                if id_digits:
+                    try:
+                        client_id = int(id_digits[0])
+                    except ValueError:
+                        client_id = None
+            else:
+                client_name = body.strip()
+        elif l.startswith("📍 Manzil:"):
+            location_text = l.split(":", 1)[1].strip()
+
+    phone_line = next(
+        (l for l in lines if l.startswith("📞 Telefon(lar):")), None
+    )
+    if phone_line:
+        phones_str = phone_line.split(":", 1)[1].strip()
+        phones_list = [
+            p.strip()
+            for p in phones_str.split(",")
+            if p.strip() and p.strip() != "—"
+        ]
+    else:
+        phones_list = []
+
+    comment_lines = []
+    products_lines = []
+    state: Optional[str] = None
+
+    for l in lines:
+        if l.startswith("💬 Izoh/comment:"):
+            state = "comment"
+            continue
+        if l.startswith("☕️ Mahsulot/zakaz matni:"):
+            state = "products"
+            continue
+
+        if state == "comment":
+            comment_lines.append(l)
+        elif state == "products":
+            products_lines.append(l)
+
+    comments_str = "\n".join(comment_lines).strip()
+    products_str = "\n".join(products_lines).strip()
+
+    return {
+        "order_id": order_id,
+        "chat_title": chat_title,
+        "client_name": client_name,
+        "client_id": client_id,
+        "phones": phones_list,
+        "location_text": location_text,
+        "comments": comments_str,
+        "products": products_str,
+    }

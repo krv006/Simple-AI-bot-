@@ -67,8 +67,26 @@ async def finalize_and_send_after_delay(
     else:
         loc_str = "—"
 
+    # 1) Avval DB ga yozamiz va order_id olamiz
+    order_id: Optional[int] = None
+    try:
+        order_id = save_order_row(
+            settings=settings,
+            message=base_message,
+            phones=client_phones,
+            order_text=products_str,
+            location=finalized.location,
+        )
+    except Exception as e:
+        logger.error("Failed to save order to Postgres: %s", e)
+
+    # 2) Sarlavhaga ID qo'shamiz
+    header_line = "🆕 Yangi zakaz"
+    if order_id is not None:
+        header_line += f" (ID: {order_id})"
+
     msg_text = (
-        f"🆕 Yangi zakaz\n"
+        f"{header_line}\n"
         f"👥 Guruhdan: {chat_title}\n"
         f"👤 Mijoz: {full_name} (id: {user.id})\n\n"
         f"📞 Telefon(lar): {phones_str}\n"
@@ -87,6 +105,7 @@ async def finalize_and_send_after_delay(
         {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": "order",
+            "order_id": order_id,
             "chat_id": base_message.chat.id,
             "chat_title": chat_title,
             "user_id": user.id,
@@ -96,19 +115,6 @@ async def finalize_and_send_after_delay(
             "raw_messages": finalized.raw_messages,
         },
     )
-
-    # DB ga yozamiz (status = TRUE). save_order_row dan order_id qaytishi kerak.
-    order_id: Optional[int] = None
-    try:
-        order_id = save_order_row(
-            settings=settings,
-            message=base_message,
-            phones=client_phones,
-            order_text=products_str,
-            location=finalized.location,
-        )
-    except Exception as e:
-        logger.error("Failed to save order to Postgres: %s", e)
 
     reply_markup = None
     if order_id is not None:
@@ -142,9 +148,9 @@ async def finalize_and_send_after_delay(
         )
         sent_msg = await base_message.answer(msg_text, reply_markup=reply_markup)
 
-    # 10 sekunddan keyin inline keyboardni avtomatik olib tashlash
+    # 30 sekunddan keyin inline keyboardni avtomatik olib tashlash
     if reply_markup is not None:
-        asyncio.create_task(auto_remove_cancel_keyboard(sent_msg, delay=10))
+        asyncio.create_task(auto_remove_cancel_keyboard(sent_msg, delay=30))
 
     clear_session(key)
     logger.info("Session cleared for key=%s", key)
