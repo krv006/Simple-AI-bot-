@@ -1,7 +1,7 @@
 # bot/handlers/voice_stt.py
 import logging
-from io import BytesIO
 from datetime import datetime, timezone
+from io import BytesIO
 
 from aiogram import Dispatcher, F
 from aiogram.enums import ChatType
@@ -10,6 +10,7 @@ from aiogram.types import Message
 from bot.ai.stt_uzbekvoice import stt_uzbekvoice
 from bot.config import Settings
 from bot.storage import get_or_create_session
+from bot.utils.amounts import extract_amount_from_text  # <<< YANGI
 from bot.utils.phones import extract_phones
 
 logger = logging.getLogger(__name__)
@@ -21,15 +22,6 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
         F.voice,
     )
     async def handle_voice_message(message: Message):
-        """
-        Voice kelganda:
-        1) Telegram’dan voice faylni yuklab oladi
-        2) Uzbekvoice.ai ga yuboradi
-        3) Matnni session.ga yozadi, telefonlarni session.phones ga qo‘shadi
-        4) Agar matnda telefon yoki summa bor bo‘lsa, lekin location yo‘q bo‘lsa,
-           userdan location so‘raydi.
-        Location kelganda esa asosiy order.py finalize qiladi.
-        """
         if message.from_user is None or message.from_user.is_bot:
             return
 
@@ -62,7 +54,7 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
                 )
                 return
 
-            logger.info('STT text: %r', text)
+            logger.info("STT text: %r", text)
             print(text)
 
             # 3. Order sessiyasiga ulash
@@ -78,7 +70,21 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
 
             session.updated_at = datetime.now(timezone.utc)
 
-            # 4. Matnda summa bor-yo‘qligini tekshiramiz
+            # 4. SUMMA ni chiqarib olamiz
+            amount = extract_amount_from_text(text)
+            if amount:
+                # Agar session structurasida amount degan maydon bo'lsa, shu yerga qo'yishingiz mumkin:
+                # session.amount = amount
+                logger.info("Extracted amount from STT: %s", amount)
+
+            # 5. Matn + summa haqida foydalanuvchiga ko'rsatish
+            reply_text = f"🎤 Golosdan olingan matn:\n\n{text}"
+            if amount:
+                reply_text += f"\n\n💰 Summa: {amount:,} so'm"
+
+            await message.answer(reply_text)
+
+            # 6. Summa/telefon bo‘lsa va location yo‘q bo‘lsa – location so‘raymiz
             low = text.lower()
             has_digits = any(ch.isdigit() for ch in text)
             money_kw = [
@@ -94,7 +100,7 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
                 "som",
             ]
             has_money_kw = any(kw in low for kw in money_kw)
-            has_amount_candidate = has_digits or has_money_kw
+            has_amount_candidate = has_digits or has_money_kw or bool(amount)
 
             logger.info(
                 "Voice session updated: phones=%s, location=%s, has_amount_candidate=%s",
@@ -103,18 +109,11 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
                 has_amount_candidate,
             )
 
-            # 5. Userga matnni ko‘rsatish (debug/demonstratsiya uchun)
-            await message.answer(f"🎤 Golosdan olingan matn:\n\n{text}")
-
-            # 6. Agar (telefon BOR yoki summa BOR) va location yo‘q bo‘lsa – location so‘raymiz
-            if (session.phones or has_amount_candidate) and session.location is None:
+            if has_amount_candidate and session.location is None:
                 await message.answer(
                     "✅ Zakaz ma'lumotlari qabul qilindi (telefon/summa).\n"
                     "📍 Iltimos, endi manzilni location ko‘rinishida yuboring."
                 )
-
-            # Location kelganda bu handler emas, asosiy handle_group_message ishlaydi.
-            # U yerda session.location to‘ldiriladi, ready bo‘lsa finalize bo‘ladi.
 
         except Exception as e:
             logger.exception("Error while processing voice message: %s", e)
