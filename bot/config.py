@@ -7,18 +7,31 @@ from dotenv import load_dotenv
 
 @dataclass
 class Settings:
+    # Telegram
     tg_bot_token: str
+
+    # AI
     openai_api_key: str | None
     openai_model: str
     gemini_api_key: str | None
     gemini_model: str
+
+    # Boshqa sozlamalar
     max_diff_seconds: int
     geocoder_user_agent: str
     debug: bool
+
+    # Guruhlar
     send_group_id: int | None
     error_group_id: int | None
     ai_check_group_id: int | None  # AI_CHECK guruh
-    db_dsn: str | None  # Postgres DSN
+
+    # Eski Postgres DSN (endilikda ishlatilmaydi, lekin xozircha qoldiramiz)
+    db_dsn: str | None
+
+    # --- DRF bilan ishlash uchun yangi maydonlar ---
+    api_base_url: str  # masalan: http://localhost:8000 yoki https://backend.domain.com
+    api_auth_token: str | None  # agar DRF token bilan himoyalangan bo'lsa (Token xxx / Bearer xxx)
 
     @property
     def openai_enabled(self) -> bool:
@@ -46,7 +59,13 @@ def load_settings() -> Settings:
     error_group_raw = os.getenv("SEND_ERROR_MESSAGE")
     ai_check_raw = os.getenv("AI_CHECK")
 
-    db_dsn = os.getenv("DB_DSN")  # postgresql://user:pass@host:port/ai_bot
+    # Eski Postgres ulanishi (endi ishlatilmaydi)
+    db_dsn = os.getenv("DB_DSN")
+
+    # DRF uchun
+    api_base_url = os.getenv("API_BASE_URL", "http://localhost:8000")
+    # masalan: "Token 123..." yoki "Bearer 123..."
+    api_auth_token = os.getenv("API_AUTH_TOKEN")
 
     def _to_int(value: str | None) -> int | None:
         if not value:
@@ -73,4 +92,6 @@ def load_settings() -> Settings:
         error_group_id=error_group_id,
         ai_check_group_id=ai_check_group_id,
         db_dsn=db_dsn,
+        api_base_url=api_base_url,
+        api_auth_token=api_auth_token,
     )

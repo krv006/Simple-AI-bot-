@@ -18,3 +18,8 @@ Comment qismda yana optimal qilish
 toliq errors la uchun code ni yozib chiqish -> location va phone number
 
 
+class mock yozish kere
+
+va unga malumot lani yuborganimda menga order create qib berishi kere boladi
+
+get order id -> id berganimda id ga tegishli malumot larni olishimiz kere boladi
