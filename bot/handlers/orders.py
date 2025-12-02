@@ -2,6 +2,7 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
+from io import BytesIO
 
 from aiogram import Dispatcher, F
 from aiogram.enums import ChatType
@@ -15,6 +16,7 @@ from aiogram.types import (
 )
 
 from bot.ai.status_intent import is_status_question
+from bot.ai.stt_uzbekvoice import stt_uzbekvoice
 from bot.utils.read_file import read_text_file
 from .order_finalize import finalize_and_send_after_delay
 from .order_manual import start_manual_order_after_cancel
@@ -47,7 +49,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             "Meni guruhga qo'shing va mijoz xabarlarini yuboring."
         )
 
-    # GROUP MESSAGE handler
+    # GROUP MESSAGE handler (text, caption, voice ham shu yerga tushadi)
     @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
     async def handle_group_message(message: Message):
         if message.from_user is None or message.from_user.is_bot:
@@ -59,23 +61,73 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             if handled:
                 return
 
-        text = message.text or message.caption or ""
+        # === 1-qadam: textni tayyorlash (voice bo'lsa STT) ===
+        text: str = ""
+
+        if message.voice:
+            # Golos orqali kelgan bo‘lsa, Uzbekvoice bilan STT qilamiz
+            if not settings.uzbekvoice_api_key:
+                await message.reply(
+                    "Golosni o‘qish servisi sozlanmagan (UZBEKVOICE_API_KEY). Admin bilan bog‘laning."
+                )
+                return
+
+            try:
+                file_info = await message.bot.get_file(message.voice.file_id)
+                file_path = file_info.file_path
+
+                bio = BytesIO()
+                await message.bot.download_file(file_path, bio)
+                bio.seek(0)
+                file_bytes = bio.read()
+
+                stt_text = await stt_uzbekvoice(
+                    file_bytes=file_bytes,
+                    api_key=settings.uzbekvoice_api_key,
+                    language="uz",
+                )
+
+                if stt_text:
+                    text = stt_text
+                else:
+                    # fallback – agar caption bo‘lsa, shundan foydalanamiz
+                    text = message.caption or ""
+                    if not text.strip():
+                        await message.reply(
+                            "Golosni matnga o‘girishda xatolik bo‘ldi, keyinroq qayta urinib ko‘ring."
+                        )
+                        return
+
+                # debug uchun xohlasangiz:
+                # await message.reply(f"🎤 Golosdan olingan matn:\n\n{text}")
+
+            except Exception as e:
+                logger.exception("Error while processing voice STT: %s", e)
+                await message.reply(
+                    "Golosni qayta ishlashda kutilmagan xatolik yuz berdi."
+                )
+                return
+        else:
+            # Oddiy holat: text yoki caption
+            text = message.text or message.caption or ""
 
         logger.info(
-            "New group msg chat=%s(%s) from=%s(%s) text=%r location=%s",
+            "New group msg chat=%s(%s) from=%s(%s) text=%r location=%s voice=%s",
             message.chat.id,
             message.chat.title,
             message.from_user.id,
             message.from_user.full_name,
             text,
             bool(message.location),
+            bool(message.voice),
         )
         print(
             f"[MSG] chat={message.chat.id}({message.chat.title}) "
             f"from={message.from_user.id}({message.from_user.full_name}) "
-            f"text={text!r} location={bool(message.location)}"
+            f"text={text!r} location={bool(message.location)} voice={bool(message.voice)}"
         )
 
+        # Session olish
         session = get_or_create_session(settings, message)
         key = get_session_key(message)
 
@@ -102,6 +154,24 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
         logger.info("Current session phones=%s", session.phones)
         logger.info("Current session location=%s", session.location)
+
+        # === YANGI: golosdan keyin location so‘rash ===
+        # 1-xabar: golos (summa + telefon) -> session.phones bor, lokatsiya yo'q.
+        # Shunda userga manzilni location qilib tashlang deb yozamiz.
+        if (
+                message.voice  # aynan golosdan keyin
+                and session.phones  # telefon bor
+                and session.location is None  # hali location yo'q
+        ):
+            try:
+                await message.reply(
+                    "✅ Zakaz ma'lumotlari qabul qilindi.\n"
+                    "📍 Iltimos, endi manzilni location ko‘rinishida yuboring."
+                )
+            except TelegramBadRequest:
+                pass
+            # bu yerda return QILMAYMIZ – order pipeline davom etadi,
+            # faqat userga eslatma berib qo'yadik.
 
         # === AI klassifikatsiya ===
         ai_result = await classify_text_ai(settings, text, session.raw_messages)
@@ -174,6 +244,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                 },
             )
 
+        # === STATUS so'rovini ajratish (telefon/location yo'q bo'lsa) ===
         if not phones_in_msg and not message.location and text.strip():
             is_status = await is_status_question(
                 settings,
@@ -260,6 +331,73 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                 )
             return
 
+            # === Session update ===
+        session.updated_at = datetime.now(timezone.utc)
+
+        # --- YANGI: butun sessiya bo‘yicha summa bor-yo‘qligini tekshiramiz ---
+        all_text = " ".join(session.raw_messages).lower()
+        has_digits_all = any(ch.isdigit() for ch in all_text)
+        money_kw_all = [
+            "summa",
+            "ming",
+            "min",
+            "мин",
+            "минг",
+            "сум",
+            "сом",
+            "тыс",
+            "so'm",
+            "som",
+        ]
+        has_money_kw_all = any(kw in all_text for kw in money_kw_all)
+        has_amount_candidate_all = has_digits_all or has_money_kw_all
+
+        ready_base = is_session_ready(session)
+
+        ready = ready_base or (
+                session.location is not None and has_amount_candidate_all
+        )
+
+        logger.info(
+            "Session ready=%s (base=%s) | is_completed=%s | just_got_location=%s | "
+            "phones_new=%s | has_product_candidate=%s | has_amount_candidate_all=%s",
+            ready,
+            ready_base,
+            session.is_completed,
+            just_got_location,
+            phones_new,
+            has_product_candidate,
+            has_amount_candidate_all,
+        )
+
+        if not ready or session.is_completed:
+            return
+
+        # Finalize trigger shartlariga ham summa bo‘yicha flagni qo‘shamiz
+        should_finalize = (
+                just_got_location
+                or role == "PRODUCT"
+                or has_addr_kw
+                or phones_new
+                or has_product_candidate
+                or has_amount_candidate_all  # <<< YANGI
+        )
+
+        if not should_finalize:
+            logger.info(
+                "Session is ready, but current message is not a finalize trigger."
+            )
+            return
+
+        asyncio.create_task(
+            finalize_and_send_after_delay(
+                key=key,
+                base_message=message,
+                settings=settings,
+            )
+        )
+        logger.info("Finalize scheduled with 5s delay for key=%s", key)
+        return
         # === Session update ===
         session.updated_at = datetime.now(timezone.utc)
 

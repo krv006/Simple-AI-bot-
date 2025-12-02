@@ -20,6 +20,8 @@ class Settings:
     ai_check_group_id: int | None  # AI_CHECK guruh
     db_dsn: str | None  # Postgres DSN
 
+    uzbekvoice_api_key: str | None  # <<< YANGI MAYDON
+
     @property
     def openai_enabled(self) -> bool:
         return bool(self.openai_api_key)
@@ -46,7 +48,9 @@ def load_settings() -> Settings:
     error_group_raw = os.getenv("SEND_ERROR_MESSAGE")
     ai_check_raw = os.getenv("AI_CHECK")
 
-    db_dsn = os.getenv("DB_DSN")  # postgresql://user:pass@host:port/ai_bot
+    db_dsn = os.getenv("DB_DSN")
+
+    uzbekvoice_api_key = os.getenv("UZBEKVOICE_API_KEY")  # <<< .env dan olamiz
 
     def _to_int(value: str | None) -> int | None:
         if not value:
@@ -73,4 +77,5 @@ def load_settings() -> Settings:
         error_group_id=error_group_id,
         ai_check_group_id=ai_check_group_id,
         db_dsn=db_dsn,
+        uzbekvoice_api_key=uzbekvoice_api_key,  # <<< shu yerda
     )
