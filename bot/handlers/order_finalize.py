@@ -55,17 +55,27 @@ async def finalize_and_send_after_delay(
     comment_str = "\n".join(final_comments) if final_comments else "—"
     products_str = "\n".join(final_products) if final_products else "—"
 
+    # Location
     loc = finalized.location
     if loc:
-        if loc["type"] == "telegram":
-            lat = loc["lat"]
-            lon = loc["lon"]
+        if loc.get("type") == "telegram":
+            lat = loc.get("lat")
+            lon = loc.get("lon")
             loc_str = f"Telegram location\nhttps://maps.google.com/?q={lat},{lon}"
         else:
-            raw_loc = loc["raw"] or ""
-            loc_str = f"{loc['type']} location: {raw_loc}"
+            raw_loc = loc.get("raw") or ""
+            loc_type = loc.get("type", "custom")
+            loc_str = f"{loc_type} location: {raw_loc}"
     else:
         loc_str = "—"
+
+    # SUMMA (voice STT dan sessiyaga tushgan)
+    amount = getattr(finalized, "amount", None)
+    if amount is not None:
+        amount_str = f"{amount:,}".replace(",", " ")
+        amount_line = f"💰 Summa: {amount_str} so'm"
+    else:
+        amount_line = "💰 Summa: —"
 
     # 1) Avval DB ga yozamiz va order_id olamiz
     order_id: Optional[int] = None
@@ -85,11 +95,13 @@ async def finalize_and_send_after_delay(
     if order_id is not None:
         header_line += f" (ID: {order_id})"
 
+    # Yakuniy xabar matni
     msg_text = (
         f"{header_line}\n"
         f"👥 Guruhdan: {chat_title}\n"
         f"👤 Mijoz: {full_name} (id: {user.id})\n\n"
         f"📞 Telefon(lar): {phones_str}\n"
+        f"{amount_line}\n"
         f"📍 Manzil: {loc_str}\n"
         f"💬 Izoh/comment:\n{comment_str}\n\n"
         f"☕️ Mahsulot/zakaz matni:\n{products_str}"
@@ -113,6 +125,7 @@ async def finalize_and_send_after_delay(
             "phones": client_phones,
             "location": finalized.location,
             "raw_messages": finalized.raw_messages,
+            "amount": amount,
         },
     )
 
@@ -148,7 +161,6 @@ async def finalize_and_send_after_delay(
         )
         sent_msg = await base_message.answer(msg_text, reply_markup=reply_markup)
 
-    # 30 sekunddan keyin inline keyboardni avtomatik olib tashlash
     if reply_markup is not None:
         asyncio.create_task(auto_remove_cancel_keyboard(sent_msg, delay=30))
 

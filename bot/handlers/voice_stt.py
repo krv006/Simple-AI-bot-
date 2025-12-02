@@ -10,15 +10,18 @@ from aiogram.types import Message
 from bot.ai.stt_uzbekvoice import stt_uzbekvoice
 from bot.config import Settings
 from bot.storage import get_or_create_session
-from bot.utils.amounts import extract_amount_from_text  # <<< YANGI
-from bot.utils.phones import extract_phones
+from bot.utils.amounts import extract_amount_from_text  # summa uchun
+from bot.utils.phones import (
+    extract_phones,
+    extract_spoken_phone_candidates,  # <<< YANGI import
+)
 
 logger = logging.getLogger(__name__)
 
 
 def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
     @dp.message(
-        F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),  # faqat guruhlar
+        F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),
         F.voice,
     )
     async def handle_voice_message(message: Message):
@@ -57,34 +60,47 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
             logger.info("STT text: %r", text)
             print(text)
 
-            # 3. Order sessiyasiga ulash
+            # 3. Session
             session = get_or_create_session(settings, message)
 
             if text:
                 session.raw_messages.append(text)
 
-            # Telefonlarni ajratib, session.phones ga qo‘shamiz
+            # 4. Telefonlar: avval oddiy raqamli formatdan
             phones_in_msg = extract_phones(text)
+
+            # 5. So'z bilan aytilgan telefonlar
+            spoken_digit_seqs = extract_spoken_phone_candidates(text)
+            for seq in spoken_digit_seqs:
+                # Har bir digit seq uchun yana extract_phones ishlatamiz
+                more_phones = extract_phones(seq)
+                for p in more_phones:
+                    if p not in phones_in_msg:
+                        phones_in_msg.append(p)
+
+            # Endi barchasini session.phones ga qo'shamiz
             for p in phones_in_msg:
                 session.phones.add(p)
 
             session.updated_at = datetime.now(timezone.utc)
 
-            # 4. SUMMA ni chiqarib olamiz
+            # 6. SUMMA ni chiqarib olamiz
             amount = extract_amount_from_text(text)
-            if amount:
-                # Agar session structurasida amount degan maydon bo'lsa, shu yerga qo'yishingiz mumkin:
-                # session.amount = amount
+            if amount is not None:
                 logger.info("Extracted amount from STT: %s", amount)
+                # sessiyaga yozib qo'yamiz, finalize paytida o'qib olamiz
+                setattr(session, "amount", amount)
 
-            # 5. Matn + summa haqida foydalanuvchiga ko'rsatish
+            # 7. Foydalanuvchiga ko'rsatish
             reply_text = f"🎤 Golosdan olingan matn:\n\n{text}"
             if amount:
                 reply_text += f"\n\n💰 Summa: {amount:,} so'm"
+            if phones_in_msg:
+                reply_text += "\n\n📞 Telefon(lar):\n" + "\n".join(phones_in_msg)
 
             await message.answer(reply_text)
 
-            # 6. Summa/telefon bo‘lsa va location yo‘q bo‘lsa – location so‘raymiz
+            # 8. Summa/telefon bo‘lsa va location yo‘q bo‘lsa – location so‘raymiz
             low = text.lower()
             has_digits = any(ch.isdigit() for ch in text)
             money_kw = [
@@ -102,14 +118,18 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
             has_money_kw = any(kw in low for kw in money_kw)
             has_amount_candidate = has_digits or has_money_kw or bool(amount)
 
+            has_phone_candidate = bool(session.phones)
+
             logger.info(
-                "Voice session updated: phones=%s, location=%s, has_amount_candidate=%s",
+                "Voice session updated: phones=%s, location=%s, "
+                "has_amount_candidate=%s, has_phone_candidate=%s",
                 session.phones,
                 session.location,
                 has_amount_candidate,
+                has_phone_candidate,
             )
 
-            if has_amount_candidate and session.location is None:
+            if (has_amount_candidate or has_phone_candidate) and session.location is None:
                 await message.answer(
                     "✅ Zakaz ma'lumotlari qabul qilindi (telefon/summa).\n"
                     "📍 Iltimos, endi manzilni location ko‘rinishida yuboring."
