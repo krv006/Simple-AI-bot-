@@ -9,6 +9,7 @@ from aiogram.types import Message
 
 from bot.ai.stt_uzbekvoice import stt_uzbekvoice
 from bot.config import Settings
+from bot.db import save_voice_stt_row  # <-- Yangi import
 from bot.storage import get_or_create_session
 from bot.utils.amounts import extract_amount_from_text
 from bot.utils.phones import (
@@ -26,13 +27,6 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
         F.voice,
     )
     async def handle_voice_message(message: Message):
-        """
-        Guruhga kelgan voice uchun:
-        1) Voice faylni Telegram'dan yuklaydi
-        2) Uzbekvoice.ai ga yuborib STT matn oladi
-        3) Matndan telefon(lar) va summani chiqarib, session ichida saqlaydi
-        4) Agar telefon/summa bo'lsa va location yo'q bo'lsa – location so'raydi
-        """
         if message.from_user is None or message.from_user.is_bot:
             return
 
@@ -52,7 +46,6 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
             bio.seek(0)
             file_bytes = bio.read()
 
-            # 2. Uzbekvoice STT - faqat RAW text qaytadi
             text = await stt_uzbekvoice(
                 file_bytes=file_bytes,
                 api_key=settings.uzbekvoice_api_key,
@@ -83,7 +76,6 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
             for p in phones_in_msg:
                 session.phones.add(p)
 
-            # 6. SUMMA ni chiqarib olamiz va sessiyaga yozamiz
             amount = extract_amount_from_text(text)
             if amount is not None:
                 logger.info("Extracted amount from STT: %s", amount)
@@ -91,7 +83,18 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
 
             session.updated_at = datetime.now(timezone.utc)
 
-            # 7. Foydalanuvchiga ko'rsatish (debug / tushunarli javob)
+            try:
+                voice_db_id = save_voice_stt_row(
+                    settings,
+                    message=message,
+                    text=text,
+                    phones=phones_in_msg or None,
+                    amount=amount,
+                )
+                logger.info("Voice STT saved to DB, id=%s", voice_db_id)
+            except Exception as db_err:
+                logger.exception("Failed to save voice STT to DB: %s", db_err)
+
             reply_text = f"🎤 Golosdan olingan matn:\n\n{text}"
             if amount is not None:
                 reply_text += f"\n\n💰 Summa: {amount:,} so'm"
@@ -100,7 +103,6 @@ def register_voice_handlers(dp: Dispatcher, settings: Settings) -> None:
 
             await message.answer(reply_text)
 
-            # 8. Summa/telefon bo‘lsa va location yo‘q bo‘lsa – location so‘raymiz
             low = text.lower()
             has_digits = any(ch.isdigit() for ch in text)
             money_kw = [
