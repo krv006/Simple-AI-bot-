@@ -1,1 +1,5 @@
 python manage.py runserver 0.0.0.0:8000
+
+Serverda gi xatolani topish uchun
+
+journalctl -u ai_bot.service -f
