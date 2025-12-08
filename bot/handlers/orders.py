@@ -18,7 +18,6 @@ from aiogram.types import (
 from bot.ai.status_intent import is_status_question
 from bot.ai.stt_uzbekvoice import stt_uzbekvoice
 from bot.utils.read_file import read_text_file
-from .ai_check_logger import send_ai_check_log
 from .error_logger import send_non_order_error
 from .order_finalize import finalize_and_send_after_delay
 from .order_manual import start_manual_order_after_cancel
@@ -199,14 +198,6 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
         logger.info("AI result=%s", ai_result)
 
-        # === AI_CHECK GURUHIGA LOG (alohida modulga olib chiqilgan) ===
-        await send_ai_check_log(
-            settings=settings,
-            message=message,
-            text=text,
-            ai_result=ai_result,
-        )
-
         # Agar message.voice bo'lsa, STT logini ham DB ga saqlab qo'yamiz
         if message.voice:
             try:
@@ -262,6 +253,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             if any(kw in low for kw in COMMENT_KEYWORDS):
                 role = "COMMENT"
 
+        # NON-ORDER (error logger)
         if (
                 not is_order_related
                 and not phones_in_msg
@@ -298,6 +290,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
         ready_base = is_session_ready(session)
 
+        # location + summa kandidati kombinatsiyasini ham hisobga olamiz
         ready = ready_base or (
                 session.location is not None and has_amount_candidate_all
         )
@@ -331,6 +324,10 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                 "Session is ready, but current message is not a finalize trigger."
             )
             return
+
+        # Sessionni shu yerning o'zida completed qilib qo'yamiz,
+        # shunda parallel kelgan xabarlar ikkinchi marta finalize chaqirmaydi
+        # session.is_completed = True
 
         asyncio.create_task(
             finalize_and_send_after_delay(

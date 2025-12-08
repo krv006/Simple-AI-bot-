@@ -9,7 +9,9 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 
 from ..config import Settings
 from ..db import save_order_row
+from ..order_dataset_db import save_order_dataset_row
 from ..storage import finalize_session, clear_session, save_order_to_json
+from .ai_check_logger import send_ai_check_log
 from .order_utils import build_final_texts, append_dataset_line
 
 # LangChain structured output (voice uchun yozgan funksiyani umumiy foydalanamiz)
@@ -58,9 +60,7 @@ def _clean_products_with_structured(
         if not line_stripped:
             continue
 
-        # raqamlar
         digits_in_line = "".join(ch for ch in line_stripped if ch.isdigit())
-
         skip = False
 
         # 1) Agar qatorda telefon raqam bo‘lsa – tashlab yuboramiz
@@ -74,7 +74,7 @@ def _clean_products_with_structured(
         if not skip and amount_digits and amount_digits in digits_in_line:
             skip = True
 
-        # 3) Agar qatorda faqat ism bo'lsa (Bahodir) va client_name shu bo'lsa – tashlab yuboramiz
+        # 3) Agar qatorda faqat ism bo'lsa va client_name shu bo'lsa – tashlab yuboramiz
         if (
             not skip
             and client_name
@@ -101,19 +101,20 @@ async def finalize_and_send_after_delay(
     """
     await asyncio.sleep(5)
 
+    # Eslatma: bu yerda finalize_session faqat key qabul qiladi (sizdagi hozirgi API shunaqa).
     finalized = finalize_session(key)
     logger.info("Delayed finalize for key=%s, finalized=%s", key, bool(finalized))
     if not finalized:
         return
 
+    chat_title = base_message.chat.title or "Noma'lum guruh"
+    user = base_message.from_user
+    full_name = user.full_name if user and user.full_name else f"id={user.id}"
+
     # build_final_texts – eski rule-based ajratish (phones/products/comments)
     client_phones, final_products, final_comments = build_final_texts(
         finalized.raw_messages, finalized.phones
     )
-
-    chat_title = base_message.chat.title or "Noma'lum guruh"
-    user = base_message.from_user
-    full_name = user.full_name if user and user.full_name else f"id={user.id}"
 
     # --- LangChain structured output orqali yakuniy strukturani chiqaramiz ---
     text_for_ai = "\n".join(finalized.raw_messages)
@@ -199,22 +200,63 @@ async def finalize_and_send_after_delay(
     else:
         amount_line = "💰 Summa: —"
 
-    # 1) Avval DB ga yozamiz va order_id olamiz
+    # === 1) YAKUNIY AI_CHECK (faqat 1 ta yozuv, 1 zakaz uchun) ===
+    try:
+        final_text_for_ai = text_for_ai
+        final_ai_result = {
+            "role": "ORDER",
+            "has_address_keywords": bool(loc),
+            "is_order_related": True,
+            "reason": "Finalized order (session ready).",
+            "order_probability": 1.0,
+            "source": "FINAL",
+            "amount": amount,
+        }
+        await send_ai_check_log(
+            settings=settings,
+            message=base_message,
+            text=final_text_for_ai,
+            ai_result=final_ai_result,
+        )
+    except Exception as e:
+        logger.error("Failed to send AI_CHECK log in finalize: %s", e)
+
+    # === 2) Avval ai_orders DB ga yozamiz va order_id olamiz ===
     order_id: Optional[int] = None
     try:
-        # Agar save_order_row ni amount qabul qiladigan qilib kengaytirgan bo'lsangiz,
-        # shu yerda amount ham yuborishingiz mumkin (masalan, amount=amount).
         order_id = save_order_row(
             settings=settings,
             message=base_message,
             phones=client_phones,
             order_text=products_str,
             location=finalized.location,
+            amount=amount,
         )
     except Exception as e:
         logger.error("Failed to save order to Postgres: %s", e)
 
-    # 2) Sarlavhaga ID qo'shamiz
+    # 3) ai_order_dataset ga hamma SMSlarni bitta qatorda yozamiz
+    try:
+        if order_id is not None:
+            messages = list(finalized.raw_messages) if finalized.raw_messages else []
+            save_order_dataset_row(
+                settings=settings,
+                order_id=order_id,
+                base_message=base_message,
+                messages=messages,
+                phones=client_phones,
+                location=finalized.location,
+                amount=amount,
+            )
+            logger.info(
+                "Order dataset saved: order_id=%s, messages_count=%s",
+                order_id,
+                len(messages),
+            )
+    except Exception as e:
+        logger.error("Failed to save order dataset row for order_id=%s: %s", order_id, e)
+
+    # 4) Sarlavhaga ID qo'shamiz
     header_line = "🆕 Yangi zakaz"
     if order_id is not None:
         header_line += f" (ID: {order_id})"
@@ -240,28 +282,35 @@ async def finalize_and_send_after_delay(
         f"☕️ Mahsulot/zakaz matni:\n{products_str}"
     )
 
-    # JSON log
-    save_order_to_json(finalized)
+    # JSON log – sizdagi eski API bo‘yicha, session obyektini berayapmiz
+    try:
+        save_order_to_json(finalized)
+    except Exception as e:
+        logger.warning("Failed to save order JSON backup: %s", e)
+
     logger.info("Order saved to ai_bot.json for key=%s", key)
 
-    # Dataset fayl (order.txt)
-    append_dataset_line(
-        "order.txt",
-        {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "type": "order",
-            "order_id": order_id,
-            "chat_id": base_message.chat.id,
-            "chat_title": chat_title,
-            "user_id": user.id,
-            "user_name": full_name,
-            "phones": client_phones,
-            "location": finalized.location,
-            "raw_messages": finalized.raw_messages,
-            "amount": amount,
-            "client_name": client_name_parsed,
-        },
-    )
+    # Dataset fayl (order.txt) – text faylga yozish
+    try:
+        append_dataset_line(
+            "order.txt",
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "type": "order",
+                "order_id": order_id,
+                "chat_id": base_message.chat.id,
+                "chat_title": chat_title,
+                "user_id": user.id,
+                "user_name": full_name,
+                "phones": client_phones,
+                "location": finalized.location,
+                "raw_messages": finalized.raw_messages,
+                "amount": amount,
+                "client_name": client_name_parsed,
+            },
+        )
+    except Exception as e:
+        logger.warning("Failed to append orders_dataset.txt for order_id=%s: %s", order_id, e)
 
     reply_markup = None
     if order_id is not None:

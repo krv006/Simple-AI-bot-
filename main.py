@@ -11,6 +11,7 @@ from bot.db import init_db
 from bot.handlers.orders import register_order_handlers
 from bot.handlers.status_checker import router as status_router
 from bot.handlers.voice_stt import register_voice_handlers
+from bot.order_dataset_db import init_order_dataset_table
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,6 +24,7 @@ async def main():
 
     if settings.db_dsn:
         init_db(settings)
+        init_order_dataset_table(settings)
 
     bot = Bot(
         token=settings.tg_bot_token,
