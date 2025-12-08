@@ -82,6 +82,40 @@ def init_db(settings: Settings) -> None:
         )
 
 
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_check_logs (
+                id              SERIAL PRIMARY KEY,
+                user_message_id BIGINT,
+                user_id         BIGINT,
+                username        TEXT,
+                full_name       TEXT,
+                group_id        BIGINT,
+                group_title     TEXT,
+                text            TEXT,
+                ai              JSONB,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_error_logs (
+                id              SERIAL PRIMARY KEY,
+                user_message_id BIGINT,
+                user_id         BIGINT,
+                username        TEXT,
+                full_name       TEXT,
+                group_id        BIGINT,
+                group_title     TEXT,
+                text            TEXT,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+
+
 def save_order_row(
         settings: Settings,
         *,
@@ -91,10 +125,6 @@ def save_order_row(
         location: Optional[dict],
         amount: Optional[int] = None,
 ) -> int:
-    """
-    Yangi order yaratish.
-    Endi amount (BIGINT) ham saqlanadi.
-    """
     conn = _get_connection(settings)
     user = message.from_user
 
@@ -244,3 +274,89 @@ def save_voice_stt_row(
         new_id_row = cur.fetchone()
         voice_id = new_id_row[0]
         return voice_id
+
+
+def save_ai_check_row(
+        settings: Settings,
+        *,
+        message: Message,
+        text: str,
+        ai_result: dict,
+) -> int:
+    conn = _get_connection(settings)
+    user = message.from_user
+
+    username = user.username if user and user.username else None
+    full_name = user.full_name if user and user.full_name else None
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ai_check_logs (
+                user_message_id,
+                user_id,
+                username,
+                full_name,
+                group_id,
+                group_title,
+                text,
+                ai
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id;
+            """,
+            (
+                message.message_id,
+                user.id if user else None,
+                username,
+                full_name,
+                message.chat.id,
+                message.chat.title,
+                text,
+                Json(ai_result) if ai_result is not None else None,
+            ),
+        )
+        row = cur.fetchone()
+        return row[0]
+
+
+def save_error_row(
+        settings: Settings,
+        *,
+        message: Message,
+        text: str,
+) -> int:
+
+    conn = _get_connection(settings)
+    user = message.from_user
+
+    username = user.username if user and user.username else None
+    full_name = user.full_name if user and user.full_name else None
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ai_error_logs (
+                user_message_id,
+                user_id,
+                username,
+                full_name,
+                group_id,
+                group_title,
+                text
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id;
+            """,
+            (
+                message.message_id,
+                user.id if user else None,
+                username,
+                full_name,
+                message.chat.id,
+                message.chat.title,
+                text,
+            ),
+        )
+        row = cur.fetchone()
+        return row[0]

@@ -18,16 +18,17 @@ from aiogram.types import (
 from bot.ai.status_intent import is_status_question
 from bot.ai.stt_uzbekvoice import stt_uzbekvoice
 from bot.utils.read_file import read_text_file
+from .ai_check_logger import send_ai_check_log
+from .error_logger import send_non_order_error
 from .order_finalize import finalize_and_send_after_delay
 from .order_manual import start_manual_order_after_cancel
 from .order_reply_update import handle_order_reply_update
 from .order_utils import (
     COMMENT_KEYWORDS,
-    append_dataset_line,
 )
 from ..ai.classifier import classify_text_ai
 from ..config import Settings
-from ..db import cancel_order_row
+from ..db import cancel_order_row, save_voice_stt_row
 from ..storage import (
     get_or_create_session,
     get_session_key,
@@ -97,9 +98,6 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
                             "Golosni matnga o‘girishda xatolik bo‘ldi, keyinroq qayta urinib ko‘ring."
                         )
                         return
-
-                # debug uchun xohlasangiz:
-                # await message.reply(f"🎤 Golosdan olingan matn:\n\n{text}")
 
             except Exception as e:
                 logger.exception("Error while processing voice STT: %s", e)
@@ -181,7 +179,7 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         # reason: str
         # order_probability: float
         # source: str
-        # amount: Optional[int]  # LangChain structured output dan
+        # amount: Optional[int]
 
         role = ai_result.get("role", "UNKNOWN")
         has_addr_kw = ai_result.get("has_address_keywords", False)
@@ -194,78 +192,33 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
         # Agar AI summa topgan bo‘lsa – sessiyaga yozib qo‘yamiz
         if amount is not None:
             try:
-                # agar oldin summa bo'lmasa yoki 0 bo'lsa yangilaymiz
                 if getattr(session, "amount", None) in (None, 0):
                     session.amount = int(amount)
             except Exception:
-                # har ehtimolga qarshi, sessiya modeli o‘zgarmagan bo‘lsa ham bot yiqilmasin
                 logger.warning("Failed to set session.amount from ai_result: %r", amount)
 
         logger.info("AI result=%s", ai_result)
 
-        # === AI_CHECK GURUHIGA LOG ===
-        if settings.ai_check_group_id:
-            src_chat_title = message.chat.title or str(message.chat.id)
-            user = message.from_user
-            full_name = (
-                user.full_name if (user and user.full_name) else f"id={user.id}"
-            )
+        # === AI_CHECK GURUHIGA LOG (alohida modulga olib chiqilgan) ===
+        await send_ai_check_log(
+            settings=settings,
+            message=message,
+            text=text,
+            ai_result=ai_result,
+        )
 
-            is_order_txt = "Ha" if is_order_related else "Yo'q"
-            has_addr_txt = "Ha" if has_addr_kw else "Yo'q"
-
-            debug_text = (
-                "🤖 AI CHECK\n"
-                f"👥 Guruh: {src_chat_title}\n"
-                f"👤 User: {full_name} (id: {user.id})\n\n"
-                f"📩 Xabar:\n{text}\n\n"
-                "AI natijasi:\n"
-                f"- orderga aloqador: {is_order_txt}\n"
-                f"- role: {role}\n"
-                f"- manzil kalit so'zlari: {has_addr_txt}\n"
-                f"- manba: {source}\n"
-            )
-
-            if isinstance(order_prob, (int, float)):
-                debug_text += f"- order ehtimoli: {order_prob:.2f}\n"
-
-            if amount is not None:
-                debug_text += f"- AI summa: {amount}\n"
-
-            if reason:
-                debug_text += f"\nSabab:\n{reason}"
-
+        # Agar message.voice bo'lsa, STT logini ham DB ga saqlab qo'yamiz
+        if message.voice:
             try:
-                await message.bot.send_message(
-                    settings.ai_check_group_id, debug_text
+                save_voice_stt_row(
+                    settings=settings,
+                    message=message,
+                    text=text,
+                    phones=list(session.phones) if session.phones else phones_in_msg or None,
+                    amount=getattr(session, "amount", None) or amount,
                 )
-            except TelegramBadRequest as e:
-                logger.error(
-                    "Failed to send AI_CHECK log to ai_check_group_id=%s: %s",
-                    settings.ai_check_group_id,
-                    e,
-                )
-
-            append_dataset_line(
-                "ai_check.txt",
-                {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "chat_id": message.chat.id,
-                    "chat_title": src_chat_title,
-                    "user_id": user.id,
-                    "user_name": full_name,
-                    "text": text,
-                    "ai": {
-                        "is_order_related": is_order_related,
-                        "role": role,
-                        "has_address_keywords": has_addr_kw,
-                        "reason": reason,
-                        "order_probability": order_prob,
-                        "source": source,
-                        "amount": amount,
-                    },
-                },
-            )
+            except Exception as e:
+                logger.error("Failed to save voice STT row: %s", e)
 
         # === STATUS so'rovini ajratish (telefon/location yo'q bo'lsa) ===
         if not phones_in_msg and not message.location and text.strip():
@@ -309,49 +262,17 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
             if any(kw in low for kw in COMMENT_KEYWORDS):
                 role = "COMMENT"
 
-        # === NON-ORDER error_group ===
         if (
-                settings.error_group_id
-                and not is_order_related
+                not is_order_related
                 and not phones_in_msg
                 and not message.location
                 and text.strip()
         ):
-            src_chat_title = message.chat.title or str(message.chat.id)
-            user = message.from_user
-            full_name = (
-                user.full_name if user and user.full_name else f"id={user.id}"
+            await send_non_order_error(
+                settings=settings,
+                message=message,
+                text=text,
             )
-
-            error_text = (
-                f"👥 Guruh: {src_chat_title}\n"
-                f"👤 User: {full_name} (id: {user.id})\n\n"
-                f"📩 Xabar:\n{text}"
-            )
-
-            append_dataset_line(
-                "errors.txt",
-                {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "type": "error",
-                    "chat_id": message.chat.id,
-                    "chat_title": src_chat_title,
-                    "user_id": user.id,
-                    "user_name": full_name,
-                    "text": text,
-                },
-            )
-
-            try:
-                await message.bot.send_message(
-                    settings.error_group_id, error_text
-                )
-            except TelegramBadRequest as e:
-                logger.error(
-                    "Failed to send non-order message to error_group_id=%s: %s",
-                    settings.error_group_id,
-                    e,
-                )
             return
 
         # === Session update ===
@@ -377,8 +298,6 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
         ready_base = is_session_ready(session)
 
-        # Summa AI dan yoki matndan bo'lishi mumkin, shuning uchun
-        # base_ready + (location + summa kandidati) kombinatsiyasini ham hisobga olamiz
         ready = ready_base or (
                 session.location is not None and has_amount_candidate_all
         )
@@ -425,7 +344,6 @@ def register_order_handlers(dp: Dispatcher, settings: Settings) -> None:
 
     @dp.callback_query(F.data.startswith("cancel_order:"))
     async def handle_cancel_order(callback: CallbackQuery):
-
         data = callback.data or ""
         try:
             _, raw_id = data.split(":", 1)
