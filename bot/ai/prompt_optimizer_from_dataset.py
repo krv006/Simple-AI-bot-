@@ -22,9 +22,10 @@ def load_dataset_cases_from_db(
 def optimize_prompt_from_dataset(
     settings: Settings,
     limit: int = 200,
-) -> None:
+) -> dict:
     """
-    Datasetni bevosita DB'dan olib, prompt_config.json ni yangilaydi.
+    Datasetni bevosita DB'dan olib, prompt_config.json ni yangilaydi
+    va YANGI config'ni dict sifatida qaytaradi.
     """
     current_config, config_hash = load_prompt_config()
     cases = load_dataset_cases_from_db(settings, limit=limit)
@@ -67,3 +68,4 @@ Izoh yozmang.
 
     save_prompt_config(new_config)
     print("✅ prompt_config.json DB'dagi dataset asosida yangilandi.")
+    return new_config
