@@ -3,15 +3,15 @@
 import json
 from typing import Any, Dict, List
 
+from .llm import call_llm_as_json  # Sizdagi OpenAI wrapper
 from .prompt_manager import load_prompt_config, save_prompt_config
 from ..config import Settings
 from ..db import load_orders_for_prompt_dataset
-from .llm import call_llm_as_json   # Sizdagi OpenAI wrapper
 
 
 def load_dataset_cases_from_db(
-    settings: Settings,
-    limit: int = 200,
+        settings: Settings,
+        limit: int = 200,
 ) -> List[Dict[str, Any]]:
     """
     ai_orders jadvalidan prompt optimizer uchun misollarni oladi.
@@ -20,32 +20,36 @@ def load_dataset_cases_from_db(
 
 
 def optimize_prompt_from_dataset(
-    settings: Settings,
-    limit: int = 200,
-) -> dict:
-    """
-    Datasetni bevosita DB'dan olib, prompt_config.json ni yangilaydi
-    va YANGI config'ni dict sifatida qaytaradi.
-    """
+        settings: Settings,
+        limit: int = 200,
+) -> Dict[str, Dict[str, Any]]:
+
     current_config, config_hash = load_prompt_config()
     cases = load_dataset_cases_from_db(settings, limit=limit)
 
     if not cases:
-        raise RuntimeError("DB'dan dataset topilmadi, ai_orders bo'sh yoki limit juda kichik.")
+        raise RuntimeError(
+            "DB'dan dataset topilmadi, ai_orders bo'sh yoki limit juda kichik."
+        )
 
     user_prompt = f"""
 Siz Telegram zakaz bot uchun PROMPT ENGINEER sifatida ishlayapsiz.
 
 Quyida:
-1) Hozirgi prompt_config.json (rules + examples)
-2) Real DB'dan olingan misollar (raw_text + to‘g‘ri natijalar)
+1) Hozirgi prompt_config.json (rules + output_schema + examples)
+2) Real DB'dan olingan misollar (input + ground_truth)
 
 Vazifa:
 - Qoidalarga aniq, kerakli o‘zgartirishlar kiriting.
-- Telefonni noto‘g‘ri aniqlashga olib keladigan so'zlarni to'g'rilang
+- Telefonni noto‘g‘ri aniqlashga olib keladigan so‘zlarni to‘g‘rilang
   (masalan, 'to'qsonlik', 'yetmishlik', 'to'qson birlik' – telefon emas).
-- Kerak bo'lsa, examples bo'limiga yangi misollar qo‘shing.
+- Kerak bo‘lsa, examples bo‘limiga yangi misollar qo‘shing.
 - Keraksiz, haddan tashqari murakkab qoidalar qo‘shmang.
+
+Cheklovlar:
+- Top-level kalitlar o‘zgarmasligi kerak: ["version", "meta", "rules", "output_schema", "examples"].
+- "output_schema" ni O‘ZGARTIRMANG. Faqat "rules" va "examples" ichida ishlang.
+- Telefonni yoki summani hech qachon taxmin qilmang – faqat matndagi aniq ma’lumotdan foydalaning.
 
 Hozirgi prompt_config:
 {json.dumps(current_config, ensure_ascii=False, indent=2)}
@@ -68,4 +72,8 @@ Izoh yozmang.
 
     save_prompt_config(new_config)
     print("✅ prompt_config.json DB'dagi dataset asosida yangilandi.")
-    return new_config
+
+    return {
+        "old_config": current_config,
+        "new_config": new_config,
+    }
