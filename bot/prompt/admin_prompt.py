@@ -19,7 +19,7 @@ from bot.prompt.prompt_optimizer import optimize_prompt_from_dataset
 
 logger = logging.getLogger(__name__)
 
-ADMIN_IDS = {1305675046}
+ADMIN_IDS = {1305675046, 120147430}
 PROMPT_DEBUG_CHAT_ID = -5030824970
 
 
