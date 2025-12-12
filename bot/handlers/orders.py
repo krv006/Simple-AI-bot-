@@ -16,7 +16,7 @@ from aiogram.types import (
 )
 
 from bot.ai.status_intent import is_status_question
-from bot.ai.stt_uzbekvoice import stt_uzbekvoice
+from bot.services.stt_uzbekvoice import stt_uzbekvoice
 from bot.utils.read_file import read_text_file
 from .error_logger import send_non_order_error
 from .order_finalize import finalize_and_send_after_delay

@@ -3,11 +3,11 @@ import json
 from typing import Any, Dict
 
 from openai import OpenAI
-from ..config import Settings
+
+from bot.config import Settings
 
 
 def _extract_json_from_text(content: str) -> str:
-
     text = (content or "").strip()
 
     if text.startswith("```"):
@@ -21,18 +21,17 @@ def _extract_json_from_text(content: str) -> str:
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and start < end:
-        text = text[start : end + 1].strip()
+        text = text[start: end + 1].strip()
 
     return text
 
 
 def call_llm_as_json(
-    settings: Settings,
-    *,
-    system_prompt: str,
-    user_prompt: str,
+        settings: Settings,
+        *,
+        system_prompt: str,
+        user_prompt: str,
 ) -> Dict[str, Any]:
-
     client = OpenAI(api_key=settings.openai_api_key)
 
     resp = client.chat.completions.create(

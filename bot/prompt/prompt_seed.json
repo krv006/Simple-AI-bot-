@@ -60,7 +60,9 @@
   "output_schema": {
     "description": "AI qaytarishi kerak bo'lgan yakuniy JSON format",
     "schema": {
-      "phones": ["Telefon raqamlar ro'yxati"],
+      "phones": [
+        "Telefon raqamlar ro'yxati"
+      ],
       "amount": "number yoki null",
       "address": {
         "type": "text | location_url | none",
@@ -69,7 +71,9 @@
       "comment": "qo'shimcha izoh yoki null",
       "action": {
         "type": "create yoki update",
-        "fields": ["o'zgargan maydonlar ro'yxati"]
+        "fields": [
+          "o'zgargan maydonlar ro'yxati"
+        ]
       },
       "self_evaluation": {
         "confidence": "0.0 - 1.0 float",
@@ -82,11 +86,23 @@
     {
       "input": "besh yuz ming telefon raqami to'qson birlik bir yuz o'n bir o'n ikki oltmish uch, manzil lokatsiya bilan yuboraman",
       "expected_output": {
-        "phones": ["+998901110263"],
+        "phones": [
+          "+998901110263"
+        ],
         "amount": 500000,
-        "address": { "type": "none", "value": null },
+        "address": {
+          "type": "none",
+          "value": null
+        },
         "comment": "manzil lokatsiya orqali keladi",
-        "action": { "type": "create", "fields": ["phones", "amount", "address"] },
+        "action": {
+          "type": "create",
+          "fields": [
+            "phones",
+            "amount",
+            "address"
+          ]
+        },
         "self_evaluation": {
           "confidence": 0.8,
           "need_human_review": false,
@@ -97,11 +113,23 @@
     {
       "input": "Chilonzor 5 mavze, 14 uy, 43 xonadon. Telefon +99890 123 45 67. Besh yuz mingga zakaz.",
       "expected_output": {
-        "phones": ["+998901234567"],
+        "phones": [
+          "+998901234567"
+        ],
         "amount": 500000,
-        "address": { "type": "text", "value": "Chilonzor 5 mavze, 14 uy, 43 xonadon" },
+        "address": {
+          "type": "text",
+          "value": "Chilonzor 5 mavze, 14 uy, 43 xonadon"
+        },
         "comment": null,
-        "action": { "type": "create", "fields": ["phones", "amount", "address"] },
+        "action": {
+          "type": "create",
+          "fields": [
+            "phones",
+            "amount",
+            "address"
+          ]
+        },
         "self_evaluation": {
           "confidence": 0.9,
           "need_human_review": false,
@@ -112,14 +140,22 @@
     {
       "input": "mana lokatsiya https://maps.google.com/?q=41.296157,69.261304 raqamlar: to'qson birlik bir yuz o'n bir o'n ikki oltmish uch",
       "expected_output": {
-        "phones": ["+998901110263"],
+        "phones": [
+          "+998901110263"
+        ],
         "amount": null,
         "address": {
           "type": "location_url",
           "value": "https://maps.google.com/?q=41.296157,69.261304"
         },
         "comment": null,
-        "action": { "type": "create", "fields": ["phones", "address"] },
+        "action": {
+          "type": "create",
+          "fields": [
+            "phones",
+            "address"
+          ]
+        },
         "self_evaluation": {
           "confidence": 0.7,
           "need_human_review": true,
@@ -130,11 +166,21 @@
     {
       "input": "telefonni o'zgartiring yangi raqam: to'qson birlik bir yuz o'n bir o'n ikki oltmish uch",
       "expected_output": {
-        "phones": ["+998901110263"],
+        "phones": [
+          "+998901110263"
+        ],
         "amount": null,
-        "address": { "type": "none", "value": null },
+        "address": {
+          "type": "none",
+          "value": null
+        },
         "comment": "telefon raqami yangilandi",
-        "action": { "type": "update", "fields": ["phones"] },
+        "action": {
+          "type": "update",
+          "fields": [
+            "phones"
+          ]
+        },
         "self_evaluation": {
           "confidence": 0.75,
           "need_human_review": true,

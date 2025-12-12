@@ -1,7 +1,6 @@
 # bot/db.py
-from typing import List, Optional, Dict, Any
-
 import json
+from typing import List, Optional, Dict, Any
 
 import psycopg2
 from aiogram.types import Message
@@ -191,17 +190,17 @@ def load_orders_for_prompt_dataset(
         if location is not None:
             if isinstance(location, dict):
                 true_address = (
-                    location.get("address")
-                    or location.get("raw")
-                    or None
+                        location.get("address")
+                        or location.get("raw")
+                        or None
                 )
             else:
                 try:
                     loc_obj = json.loads(location)
                     true_address = (
-                        loc_obj.get("address")
-                        or loc_obj.get("raw")
-                        or None
+                            loc_obj.get("address")
+                            or loc_obj.get("raw")
+                            or None
                     )
                 except Exception:
                     true_address = None

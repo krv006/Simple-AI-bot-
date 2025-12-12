@@ -30,9 +30,9 @@ def _simple_status_rule_based(text: str) -> bool:
 
 
 async def is_status_question(
-    settings: Settings,
-    text: str,
-    context_messages: List[str] | None = None,
+        settings: Settings,
+        text: str,
+        context_messages: List[str] | None = None,
 ) -> bool:
     """
     Foydalanuvchi xabari zakaz holatini/statusini so'rayaptimi – yo'qmi, shuni aniqlaydi.
@@ -85,10 +85,10 @@ Faqat quyidagi JSON formatda javob qaytaring:
         """.strip()
 
         user_prompt = (
-            "Kontekst xabarlar (agar bo'lsa, oxirgi 5 ta):\n"
-            + "\n".join(f"- {m}" for m in context_messages[-5:])
-            + "\n\nTahlil qilinadigan xabar:\n"
-            + text
+                "Kontekst xabarlar (agar bo'lsa, oxirgi 5 ta):\n"
+                + "\n".join(f"- {m}" for m in context_messages[-5:])
+                + "\n\nTahlil qilinadigan xabar:\n"
+                + text
         )
 
         resp = client.chat.completions.create(

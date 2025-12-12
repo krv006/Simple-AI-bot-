@@ -4,8 +4,8 @@ import logging
 from aiogram import Router, F
 from aiogram.types import Message
 
-from bot.utils.read_file import read_text_file
 from bot.ai.status_intent import is_status_question
+from bot.utils.read_file import read_text_file
 
 logger = logging.getLogger(__name__)
 

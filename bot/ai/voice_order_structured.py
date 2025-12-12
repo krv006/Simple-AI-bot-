@@ -7,7 +7,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 from bot.config import Settings
-from .prompt_manager import load_prompt_config
+from bot.prompt.prompt_manager import load_prompt_config
 
 
 class VoiceOrderExtraction(BaseModel):

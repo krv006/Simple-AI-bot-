@@ -10,12 +10,12 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from ..ai.prompt_optimizer_from_dataset import optimize_prompt_from_dataset
-from ..config import Settings
-from ..db import (
+from bot.config import Settings
+from bot.db import (
     create_prompt_config,
     get_active_prompt_config,
 )
+from bot.prompt.prompt_optimizer import optimize_prompt_from_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +24,8 @@ PROMPT_DEBUG_CHAT_ID = -5030824970
 
 
 def _build_prompt_diff_payload(
-    old_config: Dict[str, Any],
-    new_config: Dict[str, Any],
+        old_config: Dict[str, Any],
+        new_config: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
     Eski va yangi prompt_config orasidagi farqni tayyorlaydi:
@@ -91,9 +91,9 @@ def _extract_payload(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _save_new_prompt_version(
-    settings: Settings,
-    payload: Dict[str, Any],
-    source: str = "manual_update",
+        settings: Settings,
+        payload: Dict[str, Any],
+        source: str = "manual_update",
 ) -> Dict[str, Any]:
     """
     Mavjud payload asosida yangi version yaratish.
@@ -203,11 +203,11 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
                     config_str_short = config_str
 
                 text = (
-                    "<b>🧠 Yangi prompt o'zgarishlari</b>\n"
-                    "<i>(optimizer orqali yangilandi)</i>\n\n"
-                    f"{reason_text}\n\n"
-                    "<b>Diff (faqat yangi/yangilangan qism):</b>\n"
-                    "<pre>" + html.escape(config_str_short) + "</pre>"
+                        "<b>🧠 Yangi prompt o'zgarishlari</b>\n"
+                        "<i>(optimizer orqali yangilandi)</i>\n\n"
+                        f"{reason_text}\n\n"
+                        "<b>Diff (faqat yangi/yangilangan qism):</b>\n"
+                        "<pre>" + html.escape(config_str_short) + "</pre>"
                 )
 
                 await message.bot.send_message(

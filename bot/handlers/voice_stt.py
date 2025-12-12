@@ -7,9 +7,9 @@ from aiogram import Dispatcher, F
 from aiogram.enums import ChatType
 from aiogram.types import Message
 
-from bot.ai.stt_uzbekvoice import stt_uzbekvoice
 from bot.ai.voice_order_structured import extract_order_structured
 from bot.config import Settings
+from bot.services.stt_uzbekvoice import stt_uzbekvoice
 from bot.storage import get_or_create_session
 from bot.utils.amounts import extract_amount_from_text
 from bot.utils.phones import (

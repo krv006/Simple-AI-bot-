@@ -1,13 +1,13 @@
-# bot/ai/prompt_optimizer_from_dataset.py
+# bot/ai/prompt_optimizer.py
 
 import hashlib
 import json
 from typing import Any, Dict, List
 
-from .llm import call_llm_as_json  # Sizdagi OpenAI wrapper
+from bot.config import Settings
+from bot.db import load_orders_for_prompt_dataset
+from bot.services.llm import call_llm_as_json  # Sizdagi OpenAI wrapper
 from .prompt_manager import load_prompt_config, save_prompt_config
-from ..config import Settings
-from ..db import load_orders_for_prompt_dataset
 
 TOP_LEVEL_KEYS = ["version", "meta", "rules", "output_schema", "examples"]
 

@@ -155,7 +155,7 @@ def spoken_phone_words_to_digits(text: str) -> str:
             if j < n:
                 w2 = _normalize_phone_word(words[j])
                 if w2 in UNITS and not (
-                    j + 1 < n and _normalize_phone_word(words[j + 1]) in PHONE_HUNDREDS
+                        j + 1 < n and _normalize_phone_word(words[j + 1]) in PHONE_HUNDREDS
                 ):
                     val += UNITS[w2]
                     j += 1

@@ -7,13 +7,13 @@ from typing import Optional, List
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 
+from bot.ai.voice_order_structured import extract_order_structured
+from .ai_check_logger import send_ai_check_log
+from .order_utils import build_final_texts, append_dataset_line
 from ..config import Settings
 from ..db import save_order_row
 from ..order_dataset_db import save_order_dataset_row
 from ..storage import finalize_session, clear_session, save_order_to_json
-from .ai_check_logger import send_ai_check_log
-from .order_utils import build_final_texts, append_dataset_line
-from bot.ai.voice_order_structured import extract_order_structured
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +27,10 @@ async def auto_remove_cancel_keyboard(order_message: Message, delay: int = 30):
 
 
 def _clean_products_with_structured(
-    raw_lines: List[str],
-    phones: List[str],
-    amount: Optional[int],
-    client_name: Optional[str],
+        raw_lines: List[str],
+        phones: List[str],
+        amount: Optional[int],
+        client_name: Optional[str],
 ) -> List[str]:
     cleaned: List[str] = []
 
@@ -65,9 +65,9 @@ def _clean_products_with_structured(
 
         # 3) Faqat ism bo'lib, client_name shu bo'lsa
         if (
-            not skip
-            and client_name
-            and line_stripped.lower().startswith(client_name.lower())
+                not skip
+                and client_name
+                and line_stripped.lower().startswith(client_name.lower())
         ):
             skip = True
 
@@ -80,9 +80,9 @@ def _clean_products_with_structured(
 
 
 async def finalize_and_send_after_delay(
-    key: str,
-    base_message: Message,
-    settings: Settings,
+        key: str,
+        base_message: Message,
+        settings: Settings,
 ):
     await asyncio.sleep(5)
 
@@ -131,9 +131,9 @@ async def finalize_and_send_after_delay(
             final_amount = struct.amount
 
         client_name_parsed = (
-            getattr(struct, "customer_name", None)
-            or getattr(struct, "client_name", None)
-            or None
+                getattr(struct, "customer_name", None)
+                or getattr(struct, "client_name", None)
+                or None
         )
 
         if getattr(struct, "comment", None):

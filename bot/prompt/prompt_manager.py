@@ -1,6 +1,6 @@
 # bot/ai/prompt_manager.py
-import json
 import hashlib
+import json
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -12,6 +12,7 @@ def load_prompt_config() -> Tuple[Dict[str, Any], str]:
     """
     prompt_config.json ni o'qiydi va (config, config_hash) qaytaradi
     """
+
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         data = json.load(f)
 

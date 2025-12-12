@@ -33,14 +33,14 @@ def init_order_dataset_table(settings: Settings) -> None:
 
 
 def save_order_dataset_row(
-    settings: Settings,
-    *,
-    order_id: int,
-    base_message: Message,
-    messages: List[str],
-    phones: Optional[List[str]],
-    location: Optional[dict],
-    amount: Optional[int],
+        settings: Settings,
+        *,
+        order_id: int,
+        base_message: Message,
+        messages: List[str],
+        phones: Optional[List[str]],
+        location: Optional[dict],
+        amount: Optional[int],
 ) -> int:
     """
     Bitta yakuniy zakaz bo'yicha dataset qatori saqlaydi.

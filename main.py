@@ -8,7 +8,7 @@ from aiogram.enums import ParseMode
 
 from bot.config import load_settings
 from bot.db import init_db
-from bot.handlers.admin_prompt import register_admin_prompt_handlers
+from bot.prompt.admin_prompt import register_admin_prompt_handlers
 from bot.handlers.orders import register_order_handlers
 from bot.handlers.status_checker import router as status_router
 from bot.handlers.voice_stt import register_voice_handlers
