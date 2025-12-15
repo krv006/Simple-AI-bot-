@@ -8,6 +8,9 @@ from typing import Any, Dict, List, Set
 from aiogram import Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
+from aiogram.filters.callback_data import CallbackData
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import (
     Message,
     InlineKeyboardMarkup,
@@ -15,16 +18,13 @@ from aiogram.types import (
     CallbackQuery,
 )
 
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.fsm.context import FSMContext
-from aiogram.filters.callback_data import CallbackData
-
 from bot.config import Settings
 from bot.db import (
     create_prompt_config,
     get_active_prompt_config,
 )
 from bot.prompt.prompt_optimizer import optimize_prompt_from_dataset
+from bot.utils.stt import transcribe_uzbekvoice_from_message
 
 logger = logging.getLogger(__name__)
 
@@ -42,25 +42,19 @@ PROMPT_RULE_SECTIONS = [
 ]
 
 
-# ================
-# Inline callback data
-# ================
 class PromptRuleCB(CallbackData, prefix="prule"):
-    action: str   # choose_section | toggle_optimize | cancel
+    action: str  # choose_section | toggle_optimize | cancel
     section: str  # phones | amount | ...
-    opt: str      # "0" | "1"
+    opt: str  # "0" | "1"
 
 
-# ================
-# FSM state
-# ================
 class PromptRuleState(StatesGroup):
     waiting_rule_text = State()
 
 
 def _build_prompt_diff_payload(
-    old_config: Dict[str, Any],
-    new_config: Dict[str, Any],
+        old_config: Dict[str, Any],
+        new_config: Dict[str, Any],
 ) -> Dict[str, Any]:
     old_rules = (old_config.get("rules") or {}) if isinstance(old_config, dict) else {}
     new_rules = (new_config.get("rules") or {}) if isinstance(new_config, dict) else {}
@@ -93,11 +87,6 @@ def _build_prompt_diff_payload(
 
 
 def _extract_payload(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    get_active_prompt_config 2 xil bo'lishi mumkin:
-      1) payloadning o'zi
-      2) {"id":..., "payload": {...}, "version":...}
-    """
     if not isinstance(cfg, dict):
         return {}
     inner = cfg.get("payload")
@@ -107,9 +96,9 @@ def _extract_payload(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _save_new_prompt_version(
-    settings: Settings,
-    payload: Dict[str, Any],
-    source: str = "manual_update",
+        settings: Settings,
+        payload: Dict[str, Any],
+        source: str = "manual_update",
 ) -> Dict[str, Any]:
     new_payload = copy.deepcopy(payload)
     old_version = int(new_payload.get("version", 1))
@@ -164,24 +153,96 @@ def _kb_sections(optimize_after: bool = False) -> InlineKeyboardMarkup:
 
 
 def _is_plain_command(message: Message, cmd: str) -> bool:
-    """
-    /cmd yoki /cmd@botusername holatlarini aniqlaydi (argumentsiz).
-    """
     if not message.text:
         return False
     t = message.text.strip()
     if t == f"/{cmd}":
         return True
-    # /cmd@botname
     if message.bot and message.bot.username and t == f"/{cmd}@{message.bot.username}":
         return True
     return False
 
 
+async def _apply_rule_add(
+        *,
+        message: Message,
+        state: FSMContext,
+        settings: Settings,
+        rule_text: str,
+) -> None:
+    data = await state.get_data()
+    section = data.get("section")
+    optimize_after = bool(data.get("optimize_after"))
+
+    rule_text = (rule_text or "").strip()
+    if not rule_text:
+        await message.answer("Bo‘sh matn bo‘lmaydi. Qoidani matn/voice orqali yuboring.")
+        return
+
+    cfg = get_active_prompt_config(settings)
+    if not cfg:
+        await message.answer("Active prompt topilmadi. Avval seed/manual/optimizer bilan prompt yarating.")
+        await state.clear()
+        return
+
+    payload = _extract_payload(cfg)
+    rules = payload.get("rules") or {}
+
+    if section not in rules or not isinstance(rules.get(section), list):
+        await message.answer(
+            f"'{html.escape(str(section))}' bo‘limi rules ichida topilmadi yoki list emas.\n"
+            "Avval /prompt_show_active qilib tekshiring.",
+            parse_mode=ParseMode.HTML,
+        )
+        await state.clear()
+        return
+
+    if rule_text in rules[section]:
+        await message.answer("Bu qoida allaqachon mavjud. Yangi qoida yozing.")
+        return
+
+    rules[section].append(rule_text)
+
+    saved = _save_new_prompt_version(
+        settings=settings,
+        payload=payload,
+        source=f"inline_add_rule:{section}",
+    )
+
+    await message.answer(
+        "✅ Qoida qo‘shildi va yangi version active qilindi.\n"
+        f"Bo‘lim: <b>{html.escape(str(section))}</b>\n"
+        f"Version: <b>{saved.get('version')}</b>\n"
+        f"Rule: <code>{html.escape(rule_text)}</code>\n"
+        f"Auto-optimize: <b>{'ON' if optimize_after else 'OFF'}</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+    await state.clear()
+
+    if optimize_after:
+        try:
+            await message.answer("♻️ Auto optimize ishga tushdi...")
+            result = optimize_prompt_from_dataset(settings=settings, limit=300)
+            new_config = result.get("new_config") or {}
+
+            row = create_prompt_config(
+                settings=settings,
+                payload=new_config,
+                source="optimizer(auto_after_inline_rule_add)",
+                make_active=True,
+            )
+
+            await message.answer(
+                f"✅ Optimize tugadi. Yangi active version: <b>{row.get('version')}</b>",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as e:
+            logger.exception("Auto optimize error: %s", e)
+            await message.answer(f"❌ Optimize xato: {e}")
+
+
 def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
-    # =========================
-    # 1) OPTIMIZER ORQALI YANGILASH
-    # =========================
     @dp.message(Command("optimize_prompt"), F.from_user.id.in_(ADMIN_IDS))
     async def cmd_optimize_prompt(message: Message):
         await message.answer("♻️ Prompt optimizatsiya qilinyapti...")
@@ -230,11 +291,11 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
                     config_str = config_str[:3400] + "\n...\n(truncated)"
 
                 text = (
-                    "<b>🧠 Yangi prompt o'zgarishlari</b>\n"
-                    "<i>(optimizer orqali)</i>\n\n"
-                    f"{reason_text}\n\n"
-                    "<b>Diff:</b>\n"
-                    "<pre>" + html.escape(config_str) + "</pre>"
+                        "<b>🧠 Yangi prompt o'zgarishlari</b>\n"
+                        "<i>(optimizer orqali)</i>\n\n"
+                        f"{reason_text}\n\n"
+                        "<b>Diff:</b>\n"
+                        "<pre>" + html.escape(config_str) + "</pre>"
                 )
 
                 await message.bot.send_message(
@@ -254,9 +315,6 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
                 parse_mode=ParseMode.HTML,
             )
 
-    # =========================
-    # 2) ACTIVE PROMPT'NI KO'RISH
-    # =========================
     @dp.message(Command("prompt_show_active"), F.from_user.id.in_(ADMIN_IDS))
     async def cmd_prompt_show_active(message: Message):
         cfg = get_active_prompt_config(settings)
@@ -274,9 +332,6 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
             parse_mode=ParseMode.HTML,
         )
 
-    # =========================
-    # 3) QO'LDA JSON PROMPT KIRITISH
-    # =========================
     @dp.message(Command("prompt_set_manual"), F.from_user.id.in_(ADMIN_IDS))
     async def cmd_prompt_set_manual(message: Message):
         raw_json: str | None = None
@@ -315,14 +370,11 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
             parse_mode=ParseMode.HTML,
         )
 
-    # =========================
-    # 4) /prompt_add_rule
-    #    - argumentsiz -> INLINE section tanlash
-    #    - argumentli  -> classic qo'shish
-    # =========================
+    # /prompt_add_rule:
+    # - argumentsiz -> inline
+    # - argumentli  -> classic
     @dp.message(Command("prompt_add_rule"), F.from_user.id.in_(ADMIN_IDS))
     async def cmd_prompt_add_rule(message: Message, state: FSMContext):
-        # A) argumentsiz bo'lsa -> inline menyu
         if _is_plain_command(message, "prompt_add_rule"):
             await state.clear()
             await message.answer(
@@ -331,56 +383,49 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
             )
             return
 
-        # B) classic: /prompt_add_rule <section> <rule text>
-        try:
-            parts = (message.text or "").split(" ", 2)
-            if len(parts) < 3:
-                await message.answer("Format: /prompt_add_rule &lt;section&gt; &lt;rule text&gt;")
-                return
+        # classic: /prompt_add_rule <section> <rule text>
+        parts = (message.text or "").split(" ", 2)
+        if len(parts) < 3:
+            await message.answer("Format: /prompt_add_rule &lt;section&gt; &lt;rule text&gt;",
+                                 parse_mode=ParseMode.HTML)
+            return
 
-            section = parts[1].strip()
-            rule_text = parts[2].strip()
+        section = parts[1].strip()
+        rule_text = parts[2].strip()
 
-            cfg = get_active_prompt_config(settings)
-            if not cfg:
-                await message.answer("Active prompt_config topilmadi.")
-                return
+        cfg = get_active_prompt_config(settings)
+        if not cfg:
+            await message.answer("Active prompt_config topilmadi.")
+            return
 
-            payload = _extract_payload(cfg)
-            rules = payload.get("rules") or {}
+        payload = _extract_payload(cfg)
+        rules = payload.get("rules") or {}
 
-            if section not in rules:
-                await message.answer(f"'{html.escape(section)}' bo‘limi rules ichida topilmadi.")
-                return
-            if not isinstance(rules[section], list):
-                await message.answer(f"'{html.escape(section)}' bo‘limi list emas.")
-                return
+        if section not in rules:
+            await message.answer(f"'{html.escape(section)}' bo‘limi rules ichida topilmadi.", parse_mode=ParseMode.HTML)
+            return
+        if not isinstance(rules[section], list):
+            await message.answer(f"'{html.escape(section)}' bo‘limi list emas.", parse_mode=ParseMode.HTML)
+            return
+        if rule_text in rules[section]:
+            await message.answer("Bu qoida allaqachon mavjud.")
+            return
 
-            if rule_text in rules[section]:
-                await message.answer("Bu qoida allaqachon mavjud.")
-                return
+        rules[section].append(rule_text)
 
-            rules[section].append(rule_text)
+        saved = _save_new_prompt_version(
+            settings=settings,
+            payload=payload,
+            source=f"manual_add_rule:{section}",
+        )
 
-            saved = _save_new_prompt_version(
-                settings=settings,
-                payload=payload,
-                source=f"manual_add_rule:{section}",
-            )
+        await message.answer(
+            "✅ Qoida qo‘shildi.\n"
+            f"Bo‘lim: <b>{html.escape(section)}</b>\n"
+            f"Yangi version: <b>{saved.get('version')}</b>",
+            parse_mode=ParseMode.HTML,
+        )
 
-            await message.answer(
-                "✅ Qoida qo‘shildi.\n"
-                f"Bo‘lim: <b>{html.escape(section)}</b>\n"
-                f"Yangi version: <b>{saved.get('version')}</b>",
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception as e:
-            logger.exception("prompt_add_rule xatolik: %s", e)
-            await message.answer(f"Xatolik: {e}")
-
-    # =========================
-    # 5) RULE'LARNI KO'RISH: /prompt_list_rules <section>
-    # =========================
     @dp.message(Command("prompt_list_rules"), F.from_user.id.in_(ADMIN_IDS))
     async def cmd_prompt_list_rules(message: Message):
         parts = (message.text or "").split(" ", 1)
@@ -389,7 +434,6 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
             return
 
         section = parts[1].strip()
-
         cfg = get_active_prompt_config(settings)
         if not cfg:
             await message.answer("Active prompt_config topilmadi.")
@@ -419,9 +463,6 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
             parse_mode=ParseMode.HTML,
         )
 
-    # =========================
-    # 6) RULE O'CHIRISH: /prompt_remove_rule <section> <index>
-    # =========================
     @dp.message(Command("prompt_remove_rule"), F.from_user.id.in_(ADMIN_IDS))
     async def cmd_prompt_remove_rule(message: Message):
         parts = (message.text or "").split(" ", 2)
@@ -474,32 +515,21 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
             parse_mode=ParseMode.HTML,
         )
 
-    # =========================
-    # 7) INLINE FLOW alias: /prompt_rule_add (xohlasangiz qolsin)
-    # =========================
-    @dp.message(Command("prompt_rule_add"), F.from_user.id.in_(ADMIN_IDS))
-    async def cmd_prompt_rule_add(message: Message, state: FSMContext):
-        await state.clear()
-        await message.answer(
-            "Qaysi bo‘limga qoida qo‘shamiz? Tanlang:",
-            reply_markup=_kb_sections(optimize_after=False),
-        )
-
-    # Toggle optimize
+    # INLINE: toggle optimize
     @dp.callback_query(PromptRuleCB.filter(F.action == "toggle_optimize"), F.from_user.id.in_(ADMIN_IDS))
     async def cb_toggle_optimize(query: CallbackQuery, callback_data: PromptRuleCB, state: FSMContext):
         new_opt = "0" if callback_data.opt == "1" else "1"
         await query.message.edit_reply_markup(reply_markup=_kb_sections(optimize_after=(new_opt == "1")))
         await query.answer("OK")
 
-    # Cancel
+    # INLINE: cancel
     @dp.callback_query(PromptRuleCB.filter(F.action == "cancel"), F.from_user.id.in_(ADMIN_IDS))
     async def cb_cancel(query: CallbackQuery, callback_data: PromptRuleCB, state: FSMContext):
         await state.clear()
         await query.message.edit_text("Bekor qilindi.")
         await query.answer("OK")
 
-    # Choose section
+    # INLINE: choose section
     @dp.callback_query(PromptRuleCB.filter(F.action == "choose_section"), F.from_user.id.in_(ADMIN_IDS))
     async def cb_choose_section(query: CallbackQuery, callback_data: PromptRuleCB, state: FSMContext):
         section = callback_data.section
@@ -510,84 +540,47 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
 
         await query.message.edit_text(
             f"Bo‘lim: <b>{html.escape(section)}</b>\n\n"
-            "Endi qo‘shiladigan qoida matnini yuboring.\n"
+            "Endi qo‘shiladigan qoida matnini YOKI voice yuboring.\n"
             "Masalan: <code>00 lik hech qachon telefon raqam emas</code>\n\n"
             f"Auto-optimize: <b>{'ON' if optimize_after else 'OFF'}</b>",
             parse_mode=ParseMode.HTML,
         )
         await query.answer("OK")
 
-    # Receive rule text
-    @dp.message(PromptRuleState.waiting_rule_text, F.from_user.id.in_(ADMIN_IDS))
+    # FSM: TEXT
+    @dp.message(PromptRuleState.waiting_rule_text, F.text, F.from_user.id.in_(ADMIN_IDS))
     async def st_rule_text(message: Message, state: FSMContext):
-        data = await state.get_data()
-        section = data.get("section")
-        optimize_after = bool(data.get("optimize_after"))
-
-        rule_text = (message.text or "").strip()
-        if not rule_text:
-            await message.answer("Bo‘sh matn bo‘lmaydi. Qoidani matn sifatida yuboring.")
-            return
-
-        cfg = get_active_prompt_config(settings)
-        if not cfg:
-            await message.answer("Active prompt topilmadi. Avval seed/manual/optimizer bilan prompt yarating.")
-            await state.clear()
-            return
-
-        payload = _extract_payload(cfg)
-        rules = payload.get("rules") or {}
-
-        if section not in rules or not isinstance(rules.get(section), list):
-            await message.answer(
-                f"'{html.escape(str(section))}' bo‘limi rules ichida topilmadi yoki list emas.\n"
-                "Avval /prompt_show_active qilib tekshiring.",
-                parse_mode=ParseMode.HTML,
-            )
-            await state.clear()
-            return
-
-        if rule_text in rules[section]:
-            await message.answer("Bu qoida allaqachon mavjud. Yangi qoida yozing.")
-            return
-
-        rules[section].append(rule_text)
-
-        saved = _save_new_prompt_version(
+        await _apply_rule_add(
+            message=message,
+            state=state,
             settings=settings,
-            payload=payload,
-            source=f"inline_add_rule:{section}",
+            rule_text=message.text or "",
         )
 
+    # FSM: VOICE
+    @dp.message(PromptRuleState.waiting_rule_text, F.voice, F.from_user.id.in_(ADMIN_IDS))
+    async def st_rule_voice(message: Message, state: FSMContext):
+        await message.answer("🎤 Voice qabul qilindi. STT qilinyapti...")
+
+        try:
+            text = await transcribe_uzbekvoice_from_message(message, settings, language="uz")
+        except Exception as e:
+            logger.exception("Admin prompt voice STT error: %s", e)
+            await message.answer(f"❌ STT xato: {e}")
+            return
+
+        if not text.strip():
+            await message.answer("❌ Voice dan matn chiqmadi. Qaytadan yuboring yoki text yozing.")
+            return
+
         await message.answer(
-            "✅ Qoida qo‘shildi va yangi version active qilindi.\n"
-            f"Bo‘lim: <b>{html.escape(section)}</b>\n"
-            f"Version: <b>{saved.get('version')}</b>\n"
-            f"Auto-optimize: <b>{'ON' if optimize_after else 'OFF'}</b>",
+            f"📝 STT natija:\n<pre>{html.escape(text)}</pre>",
             parse_mode=ParseMode.HTML,
         )
 
-        await state.clear()
-
-        # Auto optimize (ixtiyoriy)
-        if optimize_after:
-            try:
-                await message.answer("♻️ Auto optimize ishga tushdi...")
-                result = optimize_prompt_from_dataset(settings=settings, limit=300)
-                new_config = result.get("new_config") or {}
-
-                row = create_prompt_config(
-                    settings=settings,
-                    payload=new_config,
-                    source="optimizer(auto_after_inline_rule_add)",
-                    make_active=True,
-                )
-
-                await message.answer(
-                    f"✅ Optimize tugadi. Yangi active version: <b>{row.get('version')}</b>",
-                    parse_mode=ParseMode.HTML,
-                )
-            except Exception as e:
-                logger.exception("Auto optimize error: %s", e)
-                await message.answer(f"❌ Optimize xato: {e}")
-
+        await _apply_rule_add(
+            message=message,
+            state=state,
+            settings=settings,
+            rule_text=text,
+        )
