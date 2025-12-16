@@ -15,7 +15,7 @@ class Settings:
     max_diff_seconds: int
     geocoder_user_agent: str
     debug: bool
-    send_group_id: int | None
+    send_group_ids: int | None
     error_group_id: int | None
     ai_check_group_id: int | None  # AI_CHECK guruh
     db_dsn: str | None  # Postgres DSN
@@ -60,7 +60,7 @@ def load_settings() -> Settings:
         except ValueError:
             return None
 
-    send_group_id = _to_int(send_group_raw)
+    send_group_ids = _to_int(send_group_raw)
     error_group_id = _to_int(error_group_raw)
     ai_check_group_id = _to_int(ai_check_raw)
 
@@ -73,7 +73,7 @@ def load_settings() -> Settings:
         max_diff_seconds=max_diff_seconds,
         geocoder_user_agent=geocoder_user_agent,
         debug=debug,
-        send_group_id=send_group_id,
+        send_group_ids=send_group_ids,
         error_group_id=error_group_id,
         ai_check_group_id=ai_check_group_id,
         db_dsn=db_dsn,

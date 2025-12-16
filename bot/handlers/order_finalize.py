@@ -13,7 +13,7 @@ from .order_utils import build_final_texts, append_dataset_line
 from ..config import Settings
 from ..db import save_order_row
 from ..order_dataset_db import save_order_dataset_row
-from ..storage import finalize_session, clear_session, save_order_to_json
+from ..storage import finalize_session, save_order_to_json
 
 logger = logging.getLogger(__name__)
 
@@ -294,27 +294,33 @@ async def finalize_and_send_after_delay(
             ]
         )
 
-    target_chat_id = settings.send_group_id or base_message.chat.id
-    logger.info("Sending order to target group=%s", target_chat_id)
+    target_chat_ids = list(settings.send_group_ids) if settings.send_group_ids else [base_message.chat.id]
+    logger.info("Sending order to target groups=%s", target_chat_ids)
 
-    try:
-        sent_msg = await base_message.bot.send_message(
-            target_chat_id,
-            msg_text,
-            reply_markup=reply_markup,
-        )
-    except TelegramBadRequest as e:
-        logger.error(
-            "Failed to send order to target_chat_id=%s: %s. "
-            "Falling back to source chat_id=%s",
-            target_chat_id,
-            e,
-            base_message.chat.id,
-        )
-        sent_msg = await base_message.answer(msg_text, reply_markup=reply_markup)
+    sent_msgs: list[Message] = []
+
+    for target_chat_id in target_chat_ids:
+        try:
+            sent_msg = await base_message.bot.send_message(
+                target_chat_id,
+                msg_text,
+                reply_markup=reply_markup,
+            )
+            sent_msgs.append(sent_msg)
+        except TelegramBadRequest as e:
+            logger.error(
+                "Failed to send order to target_chat_id=%s: %s. "
+                "Falling back to source chat_id=%s",
+                target_chat_id,
+                e,
+                base_message.chat.id,
+            )
+            try:
+                fallback_msg = await base_message.answer(msg_text, reply_markup=reply_markup)
+                sent_msgs.append(fallback_msg)
+            except Exception as e2:
+                logger.error("Fallback send also failed: %s", e2)
 
     if reply_markup is not None:
-        asyncio.create_task(auto_remove_cancel_keyboard(sent_msg, delay=30))
-
-    clear_session(key)
-    logger.info("Session cleared for key=%s", key)
+        for m in sent_msgs:
+            asyncio.create_task(auto_remove_cancel_keyboard(m, delay=30))

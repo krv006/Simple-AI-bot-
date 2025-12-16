@@ -48,8 +48,14 @@ class PromptRuleCB(CallbackData, prefix="prule"):
     opt: str  # "0" | "1"
 
 
+# NEW: voice STT confirm/edit/cancel
+class PromptVoiceCB(CallbackData, prefix="pvoice"):
+    action: str  # correct | edit | cancel
+
+
 class PromptRuleState(StatesGroup):
     waiting_rule_text = State()
+    waiting_rule_edit_text = State()  # NEW: STT edit mode
 
 
 def _build_prompt_diff_payload(
@@ -150,6 +156,29 @@ def _kb_sections(optimize_after: bool = False) -> InlineKeyboardMarkup:
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _kb_voice_confirm() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Correct",
+                    callback_data=PromptVoiceCB(action="correct").pack(),
+                ),
+                InlineKeyboardButton(
+                    text="✏️ Tahrirlash",
+                    callback_data=PromptVoiceCB(action="edit").pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Bekor qilish",
+                    callback_data=PromptVoiceCB(action="cancel").pack(),
+                )
+            ],
+        ]
+    )
 
 
 def _is_plain_command(message: Message, cmd: str) -> bool:
@@ -386,8 +415,10 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
         # classic: /prompt_add_rule <section> <rule text>
         parts = (message.text or "").split(" ", 2)
         if len(parts) < 3:
-            await message.answer("Format: /prompt_add_rule &lt;section&gt; &lt;rule text&gt;",
-                                 parse_mode=ParseMode.HTML)
+            await message.answer(
+                "Format: /prompt_add_rule &lt;section&gt; &lt;rule text&gt;",
+                parse_mode=ParseMode.HTML,
+            )
             return
 
         section = parts[1].strip()
@@ -402,10 +433,16 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
         rules = payload.get("rules") or {}
 
         if section not in rules:
-            await message.answer(f"'{html.escape(section)}' bo‘limi rules ichida topilmadi.", parse_mode=ParseMode.HTML)
+            await message.answer(
+                f"'{html.escape(section)}' bo‘limi rules ichida topilmadi.",
+                parse_mode=ParseMode.HTML,
+            )
             return
         if not isinstance(rules[section], list):
-            await message.answer(f"'{html.escape(section)}' bo‘limi list emas.", parse_mode=ParseMode.HTML)
+            await message.answer(
+                f"'{html.escape(section)}' bo‘limi list emas.",
+                parse_mode=ParseMode.HTML,
+            )
             return
         if rule_text in rules[section]:
             await message.answer("Bu qoida allaqachon mavjud.")
@@ -537,6 +574,8 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
 
         await state.set_state(PromptRuleState.waiting_rule_text)
         await state.update_data(section=section, optimize_after=optimize_after)
+        # STT cache reset
+        await state.update_data(stt_text=None)
 
         await query.message.edit_text(
             f"Bo‘lim: <b>{html.escape(section)}</b>\n\n"
@@ -547,7 +586,7 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
         )
         await query.answer("OK")
 
-    # FSM: TEXT
+    # FSM: TEXT (direct add)
     @dp.message(PromptRuleState.waiting_rule_text, F.text, F.from_user.id.in_(ADMIN_IDS))
     async def st_rule_text(message: Message, state: FSMContext):
         await _apply_rule_add(
@@ -557,7 +596,7 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
             rule_text=message.text or "",
         )
 
-    # FSM: VOICE
+    # FSM: VOICE (STT -> confirm/edit)
     @dp.message(PromptRuleState.waiting_rule_text, F.voice, F.from_user.id.in_(ADMIN_IDS))
     async def st_rule_voice(message: Message, state: FSMContext):
         await message.answer("🎤 Voice qabul qilindi. STT qilinyapti...")
@@ -569,18 +608,78 @@ def register_admin_prompt_handlers(dp: Dispatcher, settings: Settings) -> None:
             await message.answer(f"❌ STT xato: {e}")
             return
 
-        if not text.strip():
+        text = (text or "").strip()
+        if not text:
             await message.answer("❌ Voice dan matn chiqmadi. Qaytadan yuboring yoki text yozing.")
             return
 
+        await state.update_data(stt_text=text)
+
         await message.answer(
-            f"📝 STT natija:\n<pre>{html.escape(text)}</pre>",
+            "📝 STT natija:\n"
+            f"<pre>{html.escape(text)}</pre>\n\n"
+            "To‘g‘rimi?",
             parse_mode=ParseMode.HTML,
+            reply_markup=_kb_voice_confirm(),
         )
 
+    # VOICE CONFIRM: correct
+    @dp.callback_query(PromptVoiceCB.filter(F.action == "correct"), F.from_user.id.in_(ADMIN_IDS))
+    async def cb_voice_correct(query: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        text = (data.get("stt_text") or "").strip()
+
+        if not text:
+            await query.answer("STT matn topilmadi.", show_alert=True)
+            return
+
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        await query.answer("OK")
+
+        # qoida qo‘shish (state ichidagi section/optimize_after saqlangan)
+        await _apply_rule_add(
+            message=query.message,
+            state=state,
+            settings=settings,
+            rule_text=text,
+        )
+
+    # VOICE CONFIRM: edit
+    @dp.callback_query(PromptVoiceCB.filter(F.action == "edit"), F.from_user.id.in_(ADMIN_IDS))
+    async def cb_voice_edit(query: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        text = (data.get("stt_text") or "").strip()
+
+        await state.set_state(PromptRuleState.waiting_rule_edit_text)
+
+        await query.message.edit_text(
+            "✏️ Tahrirlash rejimi.\n\n"
+            "Quyidagi STT matnni tahrirlab, yangi qoida sifatida TEXT yuboring:\n"
+            f"<pre>{html.escape(text) if text else '—'}</pre>",
+            parse_mode=ParseMode.HTML,
+        )
+        await query.answer("OK")
+
+    # VOICE CONFIRM: cancel
+    @dp.callback_query(PromptVoiceCB.filter(F.action == "cancel"), F.from_user.id.in_(ADMIN_IDS))
+    async def cb_voice_cancel(query: CallbackQuery, state: FSMContext):
+        await state.clear()
+        try:
+            await query.message.edit_text("Bekor qilindi.")
+        except Exception:
+            pass
+        await query.answer("OK")
+
+    # EDIT MODE: text -> add
+    @dp.message(PromptRuleState.waiting_rule_edit_text, F.text, F.from_user.id.in_(ADMIN_IDS))
+    async def st_rule_edit_text(message: Message, state: FSMContext):
         await _apply_rule_add(
             message=message,
             state=state,
             settings=settings,
-            rule_text=text,
+            rule_text=message.text or "",
         )
