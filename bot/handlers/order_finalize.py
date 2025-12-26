@@ -14,6 +14,8 @@ from ..config import Settings
 from ..db import save_order_row
 from ..order_dataset_db import save_order_dataset_row
 from ..storage import finalize_session, save_order_to_json
+# MUHIM: phones output enforce
+from ..utils.phones import normalize_phone_list_strict, ensure_phone_suffix
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +38,7 @@ def _clean_products_with_structured(
 
     phone_suffixes: List[str] = []
     for p in phones:
-        digits = "".join(ch for ch in p if ch.isdigit())
+        digits = "".join(ch for ch in (p or "") if ch.isdigit())
         if len(digits) >= 7:
             phone_suffixes.append(digits[-7:])
 
@@ -52,18 +54,15 @@ def _clean_products_with_structured(
         digits_in_line = "".join(ch for ch in line_stripped if ch.isdigit())
         skip = False
 
-        # 1) Telefon raqami bo'lsa – tashlab yuboramiz
         if digits_in_line:
             for suf in phone_suffixes:
                 if suf and suf in digits_in_line:
                     skip = True
                     break
 
-        # 2) Summa bo'lsa – tashlab yuboramiz
         if not skip and amount_digits and amount_digits in digits_in_line:
             skip = True
 
-        # 3) Faqat ism bo'lib, client_name shu bo'lsa
         if (
                 not skip
                 and client_name
@@ -99,8 +98,9 @@ async def finalize_and_send_after_delay(
         finalized.raw_messages, finalized.phones
     )
 
-    text_for_ai = "\n".join(finalized.raw_messages)
+    text_for_ai = "\n".join(finalized.raw_messages).strip()
 
+    # candidates (lekin endi prompt-first bo'lsin desangiz bo'sh ham berishingiz mumkin)
     raw_phone_candidates = list(finalized.phones) if finalized.phones else client_phones
     raw_amount_candidates: list[int] = []
     session_amount = getattr(finalized, "amount", None)
@@ -123,11 +123,17 @@ async def finalize_and_send_after_delay(
         logger.exception("Failed to run structured order extraction in finalize: %s", e)
         struct = None
 
+    # =========================
+    # APPLY STRUCTURED RESULT
+    # =========================
     if struct is not None and getattr(struct, "is_order", False):
-        if struct.phone_numbers:
-            client_phones = struct.phone_numbers
+        if getattr(struct, "phone_numbers", None):
+            # LLM phones -> strict normalize (+998...) and unique
+            normalized = normalize_phone_list_strict(struct.phone_numbers)
+            if normalized:
+                client_phones = normalized
 
-        if struct.amount is not None:
+        if getattr(struct, "amount", None) is not None:
             final_amount = struct.amount
 
         client_name_parsed = (
@@ -139,13 +145,18 @@ async def finalize_and_send_after_delay(
         if getattr(struct, "comment", None):
             final_comments = [struct.comment]
 
-    phones_str = ", ".join(client_phones) if client_phones else "—"
+    # =========================
+    # OUTPUT FORMAT ENFORCE
+    # phones_out: +998...--
+    # =========================
+    phones_out = ensure_phone_suffix(client_phones)
+    phones_str = ", ".join(phones_out) if phones_out else "—"
     comment_str = "\n".join(final_comments) if final_comments else "—"
 
     raw_lines = text_for_ai.splitlines()
     cleaned_product_lines = _clean_products_with_structured(
         raw_lines=raw_lines,
-        phones=client_phones,
+        phones=client_phones,  # ichki (suffixsiz) bilan tozalaymiz
         amount=final_amount,
         client_name=client_name_parsed,
     )
@@ -194,10 +205,11 @@ async def finalize_and_send_after_delay(
     # ai_orders ga yozish
     order_id: Optional[int] = None
     try:
+        # DBga suffixsiz yozamiz (barqarorlik uchun)
         order_id = save_order_row(
             settings=settings,
             message=base_message,
-            phones=client_phones,
+            phones=client_phones,  # suffixsiz
             order_text=products_str,
             location=finalized.location,
             amount=amount,
@@ -214,29 +226,20 @@ async def finalize_and_send_after_delay(
                 order_id=order_id,
                 base_message=base_message,
                 messages=messages,
-                phones=client_phones,
+                phones=client_phones,  # suffixsiz
                 location=finalized.location,
                 amount=amount,
             )
-            logger.info(
-                "Order dataset saved: order_id=%s, messages_count=%s",
-                order_id,
-                len(messages),
-            )
+            logger.info("Order dataset saved: order_id=%s, messages_count=%s", order_id, len(messages))
     except Exception as e:
-        logger.error(
-            "Failed to save order dataset row for order_id=%s: %s", order_id, e
-        )
+        logger.error("Failed to save order dataset row for order_id=%s: %s", order_id, e)
 
     header_line = "🆕 Yangi zakaz"
     if order_id is not None:
         header_line += f" (ID: {order_id})"
 
     if client_name_parsed:
-        client_line = (
-            f"👤 Mijoz: {client_name_parsed} "
-            f"(tg: {full_name}, id: {user.id})"
-        )
+        client_line = f"👤 Mijoz: {client_name_parsed} (tg: {full_name}, id: {user.id})"
     else:
         client_line = f"👤 Mijoz: {full_name} (id: {user.id})"
 
@@ -269,7 +272,8 @@ async def finalize_and_send_after_delay(
                 "chat_title": chat_title,
                 "user_id": user.id,
                 "user_name": full_name,
-                "phones": client_phones,
+                "phones": client_phones,  # suffixsiz dataset
+                "phones_out": phones_out,  # xohlasangiz ko'rish uchun
                 "location": finalized.location,
                 "raw_messages": finalized.raw_messages,
                 "amount": amount,
@@ -277,9 +281,7 @@ async def finalize_and_send_after_delay(
             },
         )
     except Exception as e:
-        logger.warning(
-            "Failed to append orders_dataset.txt for order_id=%s: %s", order_id, e
-        )
+        logger.warning("Failed to append orders_dataset.txt for order_id=%s: %s", order_id, e)
 
     reply_markup = None
     if order_id is not None:
@@ -309,11 +311,8 @@ async def finalize_and_send_after_delay(
             sent_msgs.append(sent_msg)
         except TelegramBadRequest as e:
             logger.error(
-                "Failed to send order to target_chat_id=%s: %s. "
-                "Falling back to source chat_id=%s",
-                target_chat_id,
-                e,
-                base_message.chat.id,
+                "Failed to send order to target_chat_id=%s: %s. Falling back to source chat_id=%s",
+                target_chat_id, e, base_message.chat.id
             )
             try:
                 fallback_msg = await base_message.answer(msg_text, reply_markup=reply_markup)

@@ -10,36 +10,108 @@ logger = logging.getLogger(__name__)
 PHONE_REGEX = re.compile(r"(\+?\d(?:[ \-\(\)]*\d){7,})")
 
 
+# =========================
+# PROMPT/LLM OUTPUT HELPERS
+# =========================
+
+PHONE_SUFFIX = "--"
+
+
+def strip_phone_suffix(s: str, suffix: str = PHONE_SUFFIX) -> str:
+    s = (s or "").strip()
+    if s.endswith(suffix):
+        return s[: -len(suffix)].strip()
+    return s
+
+
+def normalize_uz_phone_strict(raw: str) -> Optional[str]:
+    """
+    LLM yoki user matnidan kelgan phone ni qat'iy normalize qiladi.
+    Qabul qilinadigan formatlar:
+      - +998901234567
+      - 998901234567
+      - 901234567
+      - +998901234567--   (suffix bo'lsa ham)
+      - 998901234567--    (suffix bo'lsa ham)
+
+    QAYTARADI: +998XXXXXXXXX yoki None
+    """
+    if not raw:
+        return None
+
+    raw = strip_phone_suffix(raw)
+    digits = re.sub(r"\D", "", raw or "")
+
+    # +998 + 9 digits = 12 digits
+    if len(digits) == 12 and digits.startswith("998"):
+        return f"+{digits}"
+
+    # local 9 digits
+    if len(digits) == 9:
+        return f"+998{digits}"
+
+    return None
+
+
+def ensure_phone_suffix(phones: List[str], suffix: str = PHONE_SUFFIX) -> List[str]:
+    """
+    Output uchun: har bir telefon oxiriga '--' qo'shib beradi.
+    Input telefonlar suffixsiz bo'lishi mumkin.
+    """
+    out: List[str] = []
+    for p in phones or []:
+        p = (p or "").strip()
+        if not p:
+            continue
+        if not p.endswith(suffix):
+            p = p + suffix
+        out.append(p)
+    return out
+
+
+def normalize_phone_list_strict(phones: List[str]) -> List[str]:
+    """
+    LLM qaytargan phones listni tozalaydi:
+    - suffixni olib tashlaydi
+    - +998 formatga keltiradi
+    - invalid bo'lsa olib tashlaydi
+    - unique qiladi (set)
+    """
+    normalized: Set[str] = set()
+    for p in phones or []:
+        np = normalize_uz_phone_strict(p)
+        if np:
+            normalized.add(np)
+    return list(normalized)
+
+
+# =========================
+# OLD RULE-BASED (qolsin)
+# =========================
+
 def normalize_phone(raw: str) -> Optional[str]:
     """
-    Matndan olingan xom telefon satrini normalize qiladi:
-
-      "97 777 77 77"      -> +998977777777
-      "+998901234567"     -> +998901234567
-      "901234567"         -> +998901234567
-      "178033075"         -> +998178033075  (og'zaki telefonlardan)
+    Rule-based normalize (eski).
     """
     digits = re.sub(r"\D", "", raw or "")
 
     if len(digits) < 9:
         return None
 
-    # 998 bilan boshlanadigan to'liq o'zbek raqami
     if digits.startswith("998") and len(digits) == 12:
         return f"+{digits}"
 
-    # 9 xonali mahalliy raqam (90xxxxxxx, 97xxxxxxx, 178033075 va h.k.)
     if len(digits) == 9:
         return f"+998{digits}"
 
-    # Aks holda: uzoqroq bo'lsa ham + bilan qaytaramiz
     return f"+{digits}"
 
 
 def extract_phones(text: str) -> List[str]:
     """
-    Matndan raqamli telefonlarni topib, normalize qiladi.
-    (STT matn, oddiy text xabarlar va h.k. uchun.)
+    Rule-based raqamli telefonlarni topib, normalize qiladi.
+    Eslatma: TEXT pipeline uchun siz endi buni ishlatmayapsiz (prompt-first).
+    Voice/fallback uchun qoladi.
     """
     if not text:
         return []
@@ -54,36 +126,19 @@ def extract_phones(text: str) -> List[str]:
 
     result = list(normalized)
 
-    logger.info(
-        "[PHONES] text=%r -> matches=%s -> normalized=%s",
-        text,
-        matches,
-        result,
-    )
-    print(f"[PHONES] text={text!r} -> matches={matches} -> normalized={result}")
-
+    logger.info("[PHONES] text=%r -> matches=%s -> normalized=%s", text, matches, result)
     return result
 
 
 # ========== Og'zaki telefon raqamlari (so'z bilan aytilgan) ==========
 
-
 def _postprocess_phone_digits(seq: str) -> Optional[str]:
-    """
-    Og'zaki son so'zlaridan yig'ilgan raqamlar ketma-ketligini
-    telefon formatiga yaqinlashtirish uchun ishlov beramiz:
-
-      - agar 9 dan uzun bo'lsa, BIRINCHI 9 raqamni olamiz
-      - minimal uzunlik 9 raqam (to'liq o'zbek nomer)
-    """
     if not seq:
         return None
 
-    # Minimal – to'liq o'zbek nomer uzunligi (9 ta raqam)
     if len(seq) < 9:
         return None
 
-    # Juda uzun bo'lsa – birinchi 9 raqamni olamiz (oxiridagi summa va h.k. larni kesib tashlaymiz)
     if len(seq) > 9:
         seq = seq[:9]
 
@@ -91,21 +146,6 @@ def _postprocess_phone_digits(seq: str) -> Optional[str]:
 
 
 def extract_spoken_phone_candidates(text: str) -> List[str]:
-    """
-    STT matndan so'z bilan aytilgan raqamlar ketma-ketligini raqamga aylantiradi.
-    Bu yerda biz bot.utils.numbers_uz.spoken_phone_words_to_digits funksiyasidan
-    foydalanamiz (siz yozgan logic asosida).
-
-    Misollar:
-      "to'qsonlik bir yuz etti sakson ellik besh"
-        -> spoken_phone_words_to_digits(...) = "901078055"
-        -> ["901078055"]
-
-      "tezkur yol kerak to'qsonlik bir yuz yetti sakson lik besh raqamiga besh yuz ming so'm chilonzor"
-        -> spoken_phone_words_to_digits(...) taxminan "901078055500"
-        -> _postprocess_phone_digits(...) -> "901078055"
-        -> ["901078055"]
-    """
     if not text:
         return []
 
@@ -118,26 +158,14 @@ def extract_spoken_phone_candidates(text: str) -> List[str]:
 
     processed = _postprocess_phone_digits(digit_str)
     if not processed:
-        logger.info(
-            "[SPOKEN_PHONES] text=%r -> digit_str=%r is too short/invalid",
-            text,
-            digit_str,
-        )
+        logger.info("[SPOKEN_PHONES] text=%r -> digit_str=%r is too short/invalid", text, digit_str)
         return []
 
-    logger.info(
-        "[SPOKEN_PHONES] text=%r -> digit_str=%r -> %s",
-        text,
-        digit_str,
-        processed,
-    )
+    logger.info("[SPOKEN_PHONES] text=%r -> digit_str=%r -> %s", text, digit_str, processed)
     return [processed]
 
 
 def format_phone_display(phone: str) -> str:
-    """
-    +998901078055 -> 901078055 -> "90 107 80 55"
-    """
     digits = re.sub(r"\D", "", phone or "")
 
     if digits.startswith("998") and len(digits) >= 12:

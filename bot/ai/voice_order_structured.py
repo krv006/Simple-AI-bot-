@@ -1,5 +1,7 @@
 # bot/ai/voice_order_structured.py
 import json
+import time
+import logging
 from typing import List, Optional
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -9,10 +11,28 @@ from pydantic import BaseModel, Field
 from bot.config import Settings
 from bot.prompt.prompt_manager import load_prompt_config
 
+logger = logging.getLogger(__name__)
+
+# =========================
+# LLM circuit-breaker (module-level)
+# =========================
+_LLM_DISABLED_UNTIL_TS: float = 0.0
+
+
+def _llm_disabled() -> bool:
+    return time.time() < _LLM_DISABLED_UNTIL_TS
+
+
+def _disable_llm_for(seconds: int, reason: str):
+    global _LLM_DISABLED_UNTIL_TS
+    _LLM_DISABLED_UNTIL_TS = time.time() + float(seconds)
+    logger.warning("LLM disabled for %s seconds. reason=%s", seconds, reason)
+
 
 class VoiceOrderExtraction(BaseModel):
     """
     STT'dan olingan voice xabar bo'yicha yakuniy strukturali natija.
+    (Siz buni text uchun ham ishlatyapsiz.)
     """
     is_order: bool = Field(
         ...,
@@ -43,8 +63,7 @@ class VoiceOrderExtraction(BaseModel):
 
 def _escape_braces(text: str) -> str:
     """
-    ChatPromptTemplate ichida literal { } ishlatish uchun
-    ularni {{ }} ga almashtiramiz.
+    ChatPromptTemplate ichida literal { } ishlatish uchun ularni {{ }} ga almashtiramiz.
     """
     if not text:
         return text
@@ -54,7 +73,7 @@ def _escape_braces(text: str) -> str:
 def _build_prompt() -> ChatPromptTemplate:
     """
     AI-ga aniq instruksiya beradigan prompt.
-    Qoidalar prompt_config.json dan olinadi.
+    Qoidalar prompt_config.json (DB) dan olinadi.
     """
     config, config_hash = load_prompt_config()
     rules = config.get("rules", {})
@@ -71,8 +90,7 @@ def _build_prompt() -> ChatPromptTemplate:
     system_parts.append(
         _escape_braces(
             "Siz Telegram dostavka botining AI yordamchisiz. "
-            "Sizga STT (speech-to-text) orqali olingan xabar matni va "
-            "rule-based topilgan telefon/summa nomzodlari beriladi. "
+            "Sizga xabar matni va rule-based topilgan telefon/summa nomzodlari beriladi. "
             "Siz yakuniy strukturali natijani to'g'ri va ishonchli qilishingiz kerak."
         )
     )
@@ -83,7 +101,7 @@ def _build_prompt() -> ChatPromptTemplate:
         for rule in items:
             system_parts.append(_escape_braces(f"- {rule}"))
 
-    # output_schema ni JSON ko'rinishida qo'shamiz (lekin {} larni escape qilamiz)
+    # output_schema ni JSON ko'rinishida qo'shamiz
     if output_schema:
         schema_json = json.dumps(output_schema, ensure_ascii=False, indent=2)
         system_parts.append(
@@ -102,16 +120,13 @@ def _build_prompt() -> ChatPromptTemplate:
             expected_json = json.dumps(expected, ensure_ascii=False)
 
             system_parts.append(_escape_braces(f"Input:\n{inp}"))
-            system_parts.append(
-                _escape_braces("Expected JSON:\n" + expected_json)
-            )
+            system_parts.append(_escape_braces("Expected JSON:\n" + expected_json))
 
     system_msg = "\n".join(system_parts)
 
-    # Human xabar – faqat uchta placeholder: text, raw_phone_candidates, raw_amount_candidates
     human_msg = (
         "Asosiy ma'lumotlar:\n"
-        "STT matn yoki xabar matni: \"{text}\"\n\n"
+        "Xabar matni: \"{text}\"\n\n"
         "Raw telefon kandidatlari (rule-based): {raw_phone_candidates}\n"
         "Raw summa kandidatlari (rule-based): {raw_amount_candidates}\n\n"
         "Yuqoridagi ma'lumotlar asosida VoiceOrderExtraction strukturasiga mos "
@@ -130,37 +145,67 @@ def get_voice_order_extractor(settings: Settings) -> ChatOpenAI:
     """
     LangChain ChatOpenAI modelini qaytaradi.
     """
+    # max_retries: kvota tugagan paytda 3 marta urinishning foydasi yo'q
     model = ChatOpenAI(
-        model="gpt-4.1-mini",  # yoki siz ishlatayotgan model
+        model="gpt-4.1-mini",
         temperature=0,
         openai_api_key=settings.openai_api_key,
+        max_retries=0,  # MUHIM: retry'ni o'chiramiz (o'zingiz boshqarasiz)
+        timeout=30,
     )
     return model
 
 
 def extract_order_structured(
-        settings: Settings,
-        *,
-        text: str,
-        raw_phone_candidates: list[str],
-        raw_amount_candidates: list[int],
-) -> VoiceOrderExtraction:
+    settings: Settings,
+    *,
+    text: str,
+    raw_phone_candidates: list[str],
+    raw_amount_candidates: list[int],
+) -> Optional[VoiceOrderExtraction]:
     """
-    STT matn + rule-based nomzodlardan foydalanib,
+    Xabar matn + rule-based nomzodlardan foydalanib,
     LangChain structured output orqali yakuniy natijani oladi.
+
+    QAYTARADI:
+      - VoiceOrderExtraction (muvaffaqiyatli bo'lsa)
+      - None (LLM vaqtincha o'chirilgan / quota / rate-limit / boshqa xato bo'lsa)
     """
+    if _llm_disabled():
+        logger.warning("extract_order_structured skipped: LLM cooldown active.")
+        return None
+
     prompt = _build_prompt()
     llm = get_voice_order_extractor(settings)
     structured_llm = llm.with_structured_output(VoiceOrderExtraction)
-
     chain = prompt | structured_llm
 
-    result: VoiceOrderExtraction = chain.invoke(
-        {
-            "text": text,
-            "raw_phone_candidates": raw_phone_candidates,
-            "raw_amount_candidates": raw_amount_candidates,
-        }
-    )
+    try:
+        result: VoiceOrderExtraction = chain.invoke(
+            {
+                "text": text,
+                "raw_phone_candidates": raw_phone_candidates,
+                "raw_amount_candidates": raw_amount_candidates,
+            }
+        )
+        return result
 
-    return result
+    except Exception as e:
+        # LangChain ichida openai errorlar ham shu yerga tushadi
+        msg = str(e)
+
+        # 1) Balans/kvota tugagan holat (sizdagi log aynan shu)
+        if "insufficient_quota" in msg:
+            _disable_llm_for(30 * 60, "insufficient_quota")
+            logger.exception("LLM error: insufficient_quota")
+            return None
+
+        # 2) Oddiy 429 / rate limit
+        if "Error code: 429" in msg or "Too Many Requests" in msg:
+            _disable_llm_for(60, "429_rate_limit")
+            logger.exception("LLM error: 429 Too Many Requests")
+            return None
+
+        # 3) Boshqa xatolar
+        logger.exception("LLM structured extraction error: %s", e)
+        return None
